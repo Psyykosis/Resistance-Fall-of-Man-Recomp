@@ -59,6 +59,7 @@ If you hit a problem, let me know how to reproduce it and what it was, and if yo
 - In intensive areas, sound may become slightly staticky when FPS/performance drops (most noticeable right when coming out of the crater in York at the very beginning). Same SPU job thing, the sound mixing is one of those jobs so it gets bogged down right along with everything else.
 - FSR causing ghosting with some textures like foliage and trash piles.
 - One unknown, Rollers. On RPCS3, Rollers were the biggest problem, they would always crash your game when they come on screen unless you used OpenGL, Rollers would crash the game when on screen. This may be fixed or may not be, considering this uses DirectX 12 and not Vulkan. I have yet to get to where they spawn, I believe it is in Bracknell.
+- Out of bounds water like off the dock in Grimsby has some triangles on it.
 
 ## Some Plans
 
