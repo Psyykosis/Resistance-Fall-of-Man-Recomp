@@ -2,7 +2,7 @@
 
 A static recompilation of the PS3 game *Resistance: Fall of Man* into a native Windows program. No emulator: the game's PowerPC and SPU code is translated to C/C++ and compiled for your PC, with a Direct3D 12 renderer, keyboard and mouse controls, and higher resolutions.
 
-> ⚠️ **Early work in progress.** So far it has only been tested **on my pc** (Ryzen 5 3600, Radeon RX 6700 XT, 32 GB RAM, Windows 11) and played **only up to Grimsby**. Everything after Grimsby is untested no man's land: levels may crash, softlock or look wrong. Please report what you find.
+> ⚠️ **Early work in progress.** So far it has only been tested **on my pc** (Ryzen 5 3600, Radeon RX 6700 XT, 32 GB RAM, Windows 11) and played **only up to Grimsby**. Everything after Grimsby is untested no man's land: levels may crash, softlock or look wrong. Feel free to report what you find.
 
 > **This repository contains no game files and no game code.** You need your own copy of the game. The setup builds everything game-specific on your PC from that copy.
 
