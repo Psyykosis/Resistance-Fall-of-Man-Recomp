@@ -1,4 +1,4 @@
-# Resistance: Fall of Man — native PC port (work in progress)
+# Resistance: Fall of Man — native PC port (heavily WIP)
 
 A static recompilation of the PS3 game *Resistance: Fall of Man* into a native Windows program. No emulator: the game's PowerPC and SPU code is translated to C/C++ and compiled for your PC, with a Direct3D 12 renderer, keyboard and mouse controls, and higher resolutions.
 
