@@ -33,7 +33,7 @@ You only need to run Setup again after downloading a newer version of the port, 
 
 ## Controls
 
-This does have keyboard and mouse support. It should be hotswappable but I haven't tested it with controller myself as I don't use controller. Button prompts should show keys for keyboard and should switch back for controller, and certain things I didn't like like how the melee and interact button were the same button on PS3 have been separated into separate keys.
+This does have keyboard and mouse support. It should be hotswappable but I haven't tested it with controller myself as I don't use controller. Button prompts should show keys for keyboard and should switch back for controller, and certain things I didn't like like how the melee and interact button were the same button on PS3 have been separated into separate keys. You can configure keyboard and mouse controls in the launcher.
 
 ## Status
 
@@ -49,6 +49,18 @@ If you hit a problem, let me know how to reproduce it and what it was and I'll s
 - `ps3recomp/` is a modified copy of [ps3recomp](https://github.com/sp00nznet/ps3recomp) by sp00nznet (MIT licence). It holds the runtime, the PS3 system libraries (graphics, audio, input, file system, SPU scheduling) and the lifters that translate PowerPC and SPU code into C/C++.
 - `project/` is the game-specific part of the port: its hooks, mouse look, the launcher and the debug tools.
 - `tools/rfom_regen.py` runs the lifters on your decrypted `EBOOT.elf` and `game.elf`, then re-applies this port's own edits to the generated code (`tools/hooks/`).
+
+## Known Bugs
+
+- General performance drops. That is a limit of the game's main thread it uses on the CPU, it is something that needs to be chipped away at and worked on over a larger time frame as it's not a simple fix.
+- Sometimes you may randomly fall through the floor, it happened about 4 times across 3 days of testing so it's very rare and unknown what causes it yet, but a crutch has been added so that when it does happen it will hopefully put you back in place before you fall to your death, but I haven't been able to reproduce it to test the fix.
+- Shadows may flicker on and off at some times, but again it's rare and I am not sure what triggers it or how to reproduce it so I just have to play until it happens.
+- In intensive areas, sound may become slightly staticky when FPS/performance drops (most noticeable right when coming out of the crater in York at the very beginning). I'm fairly certain that is just the main thread limit, the part that handles sound gets overloaded at the same time with everything else.
+
+## Some Plans
+
+- Revamping how the game runs in terms of windows, so that it doesn't open the CMD log window and doesn't reopen when loading into missions. The CMD is just for debugging and the reopen happens because on the PS3 disc the game is separated into two different programs, the main menu is one program and the level is another program, and on the PS3 when you load into a level from the main menu it opens that next program, the window is just the separate program. I plan on making them both load in one window and removing the CMD log.
+- Adding DLSS 5 into the launcher as an optional graphics setting. It may be possible to do yourself with Reshade, but Reshade itself is untested (will be tested eventually) and it may not be able to read the depth buffer properly, so feel free to try Reshade yourself and let me know how it turns out. It should be directed to build_game\ResistanceFoMGame.exe. DLSS 5 would be much more straightforward done through the launcher because it would work through the same pipeline as FSR 3.1, just swapping it out. I cannot test it myself because I do not have an Nvidia GPU at the moment.
 
 ## Credits and licences
 
