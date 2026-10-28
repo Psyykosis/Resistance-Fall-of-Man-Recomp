@@ -42,7 +42,7 @@ This is a work in progress, tested on a single PC. The campaign has been played 
 - Performance is currently still limited by the game's SPU job system and varies by area; a fast CPU helps most.
 - There are occasional rare freezes and other bugs. The port watches for some freezes and may restart the game process automatically.
 
-If you hit a problem, let me know how to reproduce it and what it was and I'll see if I can fix it.
+If you hit a problem, let me know how to reproduce it and what it was, and attach `logs\run.log` from that session (it's in the port folder), and I'll see if I can fix it.
 
 ## How it works
 
@@ -52,10 +52,10 @@ If you hit a problem, let me know how to reproduce it and what it was and I'll s
 
 ## Known Bugs
 
-- General performance drops. That is a limit of the game's main thread it uses on the CPU, it is something that needs to be chipped away at and worked on over a larger time frame as it's not a simple fix.
+- General performance drops. That is mostly a limit of the game's SPU job system (the background jobs the PS3's SPUs ran, which currently run one after another) with the main thread waiting on them. It is something that needs to be chipped away at and worked on over a larger time frame as it's not a simple fix.
 - Sometimes you may randomly fall through the floor, it happened about 4 times across 3 days of testing so it's very rare and unknown what causes it yet, but a crutch has been added so that when it does happen it will hopefully put you back in place before you fall to your death, but I haven't been able to reproduce it to test the fix.
 - Shadows may flicker on and off at some times, but again it's rare and I am not sure what triggers it or how to reproduce it so I just have to play until it happens.
-- In intensive areas, sound may become slightly staticky when FPS/performance drops (most noticeable right when coming out of the crater in York at the very beginning). I'm fairly certain that is just the main thread limit, the part that handles sound gets overloaded at the same time with everything else.
+- In intensive areas, sound may become slightly staticky when FPS/performance drops (most noticeable right when coming out of the crater in York at the very beginning). That is the same SPU job limit: the sound mixing is one of those jobs, so it gets overloaded at the same time as everything else.
 
 ## Some Plans
 
