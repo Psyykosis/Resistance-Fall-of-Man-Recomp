@@ -57,6 +57,8 @@ If you hit a problem, let me know how to reproduce it and what it was, and if yo
 - Sometimes you may randomly fall through the floor, it happened about 4 times across 3 days of testing so it's very rare and unknown what causes it yet, but a crutch has been added so that when it does happen it will hopefully put you back in place before you fall to your death, but I haven't been able to reproduce it to test the fix.
 - Shadows may flicker on and off at some times, but again it's rare and I am not sure what triggers it or how to reproduce it so I just have to play until it happens.
 - In intensive areas, sound may become slightly staticky when FPS/performance drops (most noticeable right when coming out of the crater in York at the very beginning). Same SPU job thing, the sound mixing is one of those jobs so it gets bogged down right along with everything else.
+- FSR causing ghosting with some textures like foliage and trash piles.
+- One unknown, Rollers. On RPCS3, Rollers were the biggest problem, they would always crash your game when they come on screen unless you used OpenGL, Rollers would crash the game when on screen. This may be fixed or may not be, considering this uses DirectX 12 and not Vulkan. I have yet to get to where they spawn, I believe it is in Bracknell.
 
 ## Some Plans
 
