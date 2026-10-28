@@ -39,7 +39,8 @@ This does have keyboard and mouse support. It should be hotswappable but I haven
 
 This is a work in progress, tested on a single PC. The campaign has been played from the start through Grimsby; I haven't gone any further than Grimsby on this version so it's no man's land as I said:
 
-- Performance is currently still limited by the game's SPU job system and varies by area; a fast CPU helps most.
+- It is mostly CPU bound, uses very little GPU. Even with how CPU bound it is, it likely won't skyrocket your usage the way that emulating would. Your temp may go up but still far less than emulating does and all while giving better performance.
+- Performance is currently still limited by the game's SPU job system and varies by area; so having a decent CPU helps most.
 - There are occasional rare freezes and other bugs. The port watches for some freezes and may restart the game process automatically.
 
 If you hit a problem, let me know how to reproduce it and what it was, and if you can, send the `logs\run.log` from that session too (it's in the logs folder), that helps a ton, and I'll see if I can fix it.
