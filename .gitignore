@@ -1,0 +1,26 @@
+# Nothing from the game is ever committed: these are all produced on the
+# player's PC from their own copy by Setup.bat.
+/gamefiles/
+/game/
+/gamedata/
+/recompiled/
+/recompiled_game/
+/project/spu/*/
+/project/spu/jobmods_register.c
+/tools/key_vault.cpp
+/tools/ffmpeg_bin/
+/shadercache/
+
+# build output / runtime files
+/build/
+/build_game/
+/build_regen/
+/logs/
+/rsxcap/
+/Launcher.exe
+/settings.bat
+/settings.ini
+*.obj
+*.pdb
+*.ilk
+__pycache__/

@@ -1,0 +1,50 @@
+# Resistance PC port -- keyboard & mouse controls.
+# Edit these in Launcher.exe -> Controls, or by hand: KEY = ACTION, one per line.
+# KEYS:    A-Z 0-9 F1-F12 SPACE SHIFT CTRL ALT TAB ENTER ESC BACKSPACE UP DOWN LEFT RIGHT
+#          CAPSLOCK INSERT DELETE HOME END PGUP PGDN NUM0-NUM9
+#          GRAVE MINUS EQUALS LBRACKET RBRACKET BACKSLASH SEMICOLON APOSTROPHE COMMA PERIOD SLASH
+#          MOUSE1 (left) MOUSE2 (right) MOUSE3 (middle) MOUSE4 MOUSE5 WHEELUP WHEELDOWN
+# ACTIONS: LS_UP LS_DOWN LS_LEFT LS_RIGHT (move)  RS_UP RS_DOWN RS_LEFT RS_RIGHT (look)
+#          CROSS CIRCLE SQUARE TRIANGLE L1 R1 L2 R2 L3 R3 START SELECT
+#          DPAD_UP DPAD_DOWN DPAD_LEFT DPAD_RIGHT
+#          INTERACT (use switches/doors/vehicles; TRIANGLE then only melees)
+# A key may be listed more than once to press several things.
+
+W          = LS_UP      # Move forward
+S          = LS_DOWN    # Move back
+A          = LS_LEFT    # Move left
+D          = LS_RIGHT   # Move right
+MOUSE1     = R1         # Primary fire
+MOUSE3     = L1         # Alt. fire
+MOUSE2     = R3         # Toggle zoom
+SPACE      = CROSS      # Jump
+SHIFT      = L2         # Crouch
+C          = L2         # Crouch
+R          = SQUARE     # Reload
+MOUSE4     = SQUARE     # Reload
+MOUSE5     = TRIANGLE   # Melee
+F          = INTERACT   # Interact / use
+E          = R2         # Weapon select
+G          = CIRCLE     # Use grenade
+WHEELUP    = DPAD_UP    # Next grenade
+WHEELDOWN  = DPAD_DOWN  # Previous grenade
+1          = DPAD_LEFT  # Find partner
+T          = DPAD_RIGHT # Spotlight
+ESC        = START      # Pause
+TAB        = SELECT     # Journal
+UP         = RS_UP      # Look up (keys)
+DOWN       = RS_DOWN    # Look down (keys)
+LEFT       = RS_LEFT    # Look left (keys)
+RIGHT      = RS_RIGHT   # Look right (keys)
+
+# Mouse
+mouse_sensitivity = 2.00
+mouse_invert_y = 0
+mouse_look = direct        # direct: the mouse turns the camera 1:1 on foot; stick: old stick emulation
+mouse_degrees_per_count = 0.050   # direct look speed (x mouse_sensitivity, x the game's Look Sensitivity)
+mouse_deadzone = 0.28      # stick emulation only
+mouse_smoothing = 0.03     # stick emulation only, seconds
+mouse_release_key = F8     # free / recapture the mouse cursor
+
+# Controller
+pad_interact = NONE     # button that uses things (the game's Action button then only melees); NONE = as on PS3

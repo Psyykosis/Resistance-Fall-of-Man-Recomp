@@ -1,0 +1,1243 @@
+{
+"funcs": {
+"func_0001C05C": [
+{
+"at": 33,
+"ctx": "        uint32_t R_xer = ctx->xer;",
+"rm": [],
+"add": [
+"        const unsigned long long _ftw0 = rfom_ftw_now(); /* Resistance port: PS3_FTRACE span */"
+]
+},
+{
+"at": 141,
+"ctx": "        ctx->gpr[1] = R_1 = R_1 + (int64_t)(0x110);",
+"rm": [
+"        return;"
+],
+"add": [
+"        { rfom_ftw_span(0x1C05Cu, _ftw0, ctx); return; }"
+]
+}
+],
+"func_00043488": [
+{
+"at": 10,
+"ctx": "        vm_write64_stk(R_1 + -0x90, R_1); ctx->gpr[1] = R_1 += -0x90;",
+"rm": [],
+"add": [
+"        rfom_ld_open((uint32_t)R_3);   /* v161 diag (project/stubs.cpp) */"
+]
+}
+],
+"func_000434DC": [
+{
+"at": 19,
+"ctx": "        vm_write64_stk(R_1 + -0x80, R_1); ctx->gpr[1] = R_1 += -0x80;",
+"rm": [],
+"add": [
+"        rfom_ld_poll((uint32_t)R_3, 0);   /* v161 diag */"
+]
+}
+],
+"func_000508A8": [
+{
+"at": 22,
+"ctx": "        vm_write32(R_9 + 0x0, R_0);",
+"rm": [],
+"add": [
+"rfom_flagwait_begin();"
+]
+},
+{
+"at": 78,
+"ctx": "        /* nop */;",
+"rm": [],
+"add": [
+"        if (rfom_flagwait_timeout(\"000508A8\")) { ctx->gpr[11] = R_11 = vm_read32_fast(R_30 + -0x7FFC); ctx->gpr[9] = R_9 = vm_read32(R_11 + 0x0); goto loc_000509BC; }"
+]
+}
+],
+"func_00070408": [
+{
+"at": 20,
+"ctx": "        uint32_t R_xer = ctx->xer;",
+"rm": [],
+"add": [
+"        const unsigned long long _ftw0 = rfom_ftw_now(); /* Resistance port: PS3_FTRACE job-wait span */"
+]
+},
+{
+"at": 176,
+"ctx": "        ctx->gpr[1] = R_1 = R_1 + (int64_t)(0xC0);",
+"rm": [
+"        return;"
+],
+"add": [
+"        rfom_ftw_span(0x70408u, _ftw0, ctx); return;"
+]
+}
+],
+"func_00091CA0": [
+{
+"at": 23,
+"ctx": "        uint32_t R_xer = ctx->xer;",
+"rm": [],
+"add": [
+"        const unsigned long long _ftw0 = rfom_ftw_now(); /* Resistance port: PS3_FTRACE span */"
+]
+},
+{
+"at": 61,
+"ctx": "        ctx->gpr[31] = R_31 = _cs_31;",
+"rm": [
+"        return;"
+],
+"add": [
+"        { rfom_ftw_span(0x91CA0u, _ftw0, ctx); return; }"
+]
+},
+{
+"at": 136,
+"ctx": "        vm_write32(R_12 + 0x38, R_11);",
+"rm": [
+"        return;"
+],
+"add": [
+"        { rfom_ftw_span(0x91CA0u, _ftw0, ctx); return; }"
+]
+}
+],
+"func_000B674C": [
+{
+"at": 8,
+"ctx": "        uint64_t R_lr = ctx->lr;",
+"rm": [],
+"add": [
+"        /* Resistance port (v134): camera FOV setting. f3 = horizontal FOV in",
+"         * degrees (82 in gameplay); rfom_fov_adjust widens it per RFOM_FOV. */",
+"        const double _rfom_fov = ctx->fpr[3], _rfom_asp = ctx->fpr[4];",
+"        const uint32_t _rfom_cam = (uint32_t)R_3;",
+"        rfom_fov_note(_rfom_cam, _rfom_fov);   /* v182: zoom-scaled mouse follows the view camera only */",
+"        ctx->fpr[3] = rfom_fov_adjust(ctx->fpr[3]);"
+]
+},
+{
+"at": 80,
+"ctx": "        ctx->gpr[1] = R_1 = R_1 + (int64_t)(0xE0);",
+"rm": [],
+"add": [
+"        rfom_fov_lod_fix(_rfom_cam, _rfom_fov, _rfom_asp);   /* LOD reads +0x10/+0x14: keep them at the unwidened FOV */"
+]
+}
+],
+"func_000B7B8C": [
+{
+"at": 15,
+"ctx": "        uint32_t R_xer = ctx->xer;",
+"rm": [],
+"add": [
+"        const unsigned long long _ftw0 = rfom_ftw_now(); /* Resistance port: PS3_FTRACE job-wait span */"
+]
+},
+{
+"at": 82,
+"ctx": "        ctx->gpr[1] = R_1 = R_1 + (int64_t)(0x90);",
+"rm": [
+"        return;"
+],
+"add": [
+"        rfom_ftw_span(0xB7B8Cu, _ftw0, ctx); return;"
+]
+},
+{
+"at": 91,
+"ctx": "        ctx->gpr[1] = R_1 = R_1 + (int64_t)(0x90);",
+"rm": [
+"        return;"
+],
+"add": [
+"        rfom_ftw_span(0xB7B8Cu, _ftw0, ctx); return;"
+]
+}
+],
+"func_000B98F0": [
+{
+"at": 1,
+"ctx": "void func_000B98F0(ppu_context* ctx) {",
+"rm": [],
+"add": [
+"        rfom_text_patch((uint32_t)ctx->gpr[3]);   /* v152: button glyphs -> key names (stubs.cpp) */"
+]
+}
+],
+"func_000D2FFC": [
+{
+"at": 1,
+"ctx": "void func_000D2FFC(ppu_context* ctx) {",
+"rm": [],
+"add": [
+"        rfom_snd_note(4, 0, (uint32_t)ctx->lr, 0);   /* v144 diag */"
+]
+}
+],
+"func_000D316C": [
+{
+"at": 12,
+"ctx": "        ctx->gpr[3] = R_3 = vm_read32(R_9 + 0x0);",
+"rm": [],
+"add": [
+"        /* Resistance port (v139): speaker-count getter; see rfom_speakers. */",
+"        rfom_snd_note(3, (uint32_t)R_3, (uint32_t)ctx->lr, 0);   /* v144 diag: raw value */",
+"        ctx->gpr[3] = R_3 = rfom_speakers((uint32_t)R_3);"
+]
+}
+],
+"func_000D37B0": [
+{
+"at": 1,
+"ctx": "void func_000D37B0(ppu_context* ctx) {",
+"rm": [],
+"add": [
+"        rfom_snd_note(6, 0, (uint32_t)ctx->lr, 0);   /* v144 diag */"
+]
+}
+],
+"func_000D4BC4": [
+{
+"at": 221,
+"ctx": "        { float ftmp = (float)ctx->fpr[0]; uint32_t tmp; memcpy(&tmp, &ftmp, 4); vm_write32(R_5 + 0x4, tmp); }",
+"rm": [],
+"add": [
+"        rfom_pad_out_ea = (uint32_t)R_5;   /* v147b: per-pad stick floats (+8 right X, +0xC right Y) */"
+]
+}
+],
+"func_000D9464": [
+{
+"at": 37,
+"ctx": "        ctx->gpr[2] = R_2 = vm_read32(R_11 + 0x4);",
+"rm": [],
+"add": [
+"        rfom_ld_vcall((uint32_t)R_0, (uint32_t)R_4, (uint32_t)R_5, (uint32_t)R_6, (uint32_t)R_3);   /* v161b diag */"
+]
+},
+{
+"at": 38,
+"ctx": "        ctx->lr = R_lr = 0x000D94BC; ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+"rm": [],
+"add": [
+"        rfom_ld_vret((int32_t)R_3);   /* v161b diag */"
+]
+}
+],
+"func_000D9A18": [
+{
+"at": 133,
+"ctx": "}",
+"rm": [],
+"add": [
+"#undef _RCX_RL",
+"",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_6 = ctx->gpr[6]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_25 = ctx->gpr[25]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_ctr = ctx->ctr; R_xer = ctx->xer; } while (0)",
+"extern \"C\" void rfom_ld_step(int, uint32_t, uint32_t, uint32_t);"
+]
+}
+],
+"func_000D9B9C": [
+{
+"at": 57,
+"ctx": "        ctx->lr = R_lr = 0x000D9C04; ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+"rm": [
+"        ctx->gpr[2] = R_2 = 0x006BD648ULL; /*TOCFIX ld r2,N(r1)*/"
+],
+"add": [
+"        ctx->gpr[2] = R_2 = 0x006BD648ULL; /*TOCFIX ld r2,N(r1)*/ rfom_ld_step(4, (uint32_t)R_3, (uint32_t)R_28, 0);"
+]
+},
+{
+"at": 87,
+"ctx": "        ctx->lr = R_lr = 0x000D9C7C; ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+"rm": [
+"        ctx->gpr[2] = R_2 = 0x006BD648ULL; /*TOCFIX ld r2,N(r1)*/"
+],
+"add": [
+"        ctx->gpr[2] = R_2 = 0x006BD648ULL; /*TOCFIX ld r2,N(r1)*/ rfom_ld_step(5, (uint32_t)R_3, (uint32_t)R_28, 0);"
+]
+}
+],
+"func_000DD928": [
+{
+"at": 88,
+"ctx": "}",
+"rm": [],
+"add": [
+"#undef _RCX_RL",
+"",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_6 = ctx->gpr[6]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_22 = ctx->gpr[22]; R_23 = ctx->gpr[23]; R_24 = ctx->gpr[24]; R_25 = ctx->gpr[25]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_xer = ctx->xer; } while (0)",
+"extern \"C\" void rfom_ld_step(int, uint32_t, uint32_t, uint32_t);",
+"extern \"C\" uint32_t rfom_ld_fixdev(uint32_t, uint32_t, uint32_t);"
+]
+}
+],
+"func_000DDA18": [
+{
+"at": 79,
+"ctx": "        ctx->gpr[4] = R_4 = R_29 | R_29;",
+"rm": [
+"        ctx->lr = R_lr = 0x000DDAC8; func_000DAF10(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;"
+],
+"add": [
+"        ctx->lr = R_lr = 0x000DDAC8; func_000DAF10(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL; rfom_ld_step(1, (uint32_t)R_3, (uint32_t)R_29, (uint32_t)(R_1 + 0x170)); if ((uint32_t)R_3 == 0) { ctx->gpr[3] = R_3 = rfom_ld_fixdev((uint32_t)R_27, (uint32_t)R_29, (uint32_t)(R_1 + 0x170)); }"
+]
+},
+{
+"at": 94,
+"ctx": "        ctx->gpr[3] = R_3 = R_27 | R_27;",
+"rm": [
+"        ctx->lr = R_lr = 0x000DDB04; func_000DAD18(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;"
+],
+"add": [
+"        ctx->lr = R_lr = 0x000DDB04; func_000DAD18(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL; rfom_ld_step(2, (uint32_t)R_25, (uint32_t)R_3, 0);"
+]
+},
+{
+"at": 137,
+"ctx": "        ctx->gpr[5] = R_5 = R_28 | R_28;",
+"rm": [
+"        ctx->lr = R_lr = 0x000DDBA4; func_005DA6A0(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;"
+],
+"add": [
+"        ctx->lr = R_lr = 0x000DDBA4; func_005DA6A0(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL; rfom_ld_step(3, (uint32_t)R_3, (uint32_t)R_28, (uint32_t)R_26);"
+]
+}
+],
+"func_0010A530": [
+{
+"at": 12,
+"ctx": "        uint32_t R_xer = ctx->xer;",
+"rm": [],
+"add": [
+"        const unsigned long long _ftw0 = rfom_ftw_now(); /* Resistance port: PS3_FTRACE span (render-submit job-list wait) */"
+]
+},
+{
+"at": 27,
+"ctx": "        ctx->lr = R_lr = R_0;",
+"rm": [
+"        return;"
+],
+"add": [
+"        { rfom_ftw_span(0x10A530u, _ftw0, ctx); return; }"
+]
+},
+{
+"at": 39,
+"ctx": "        ctx->gpr[3] = R_3 = vm_read32_fast(R_30 + -0x7FF4);",
+"rm": [],
+"add": [
+"        { static int _n = 0; if (_n < 3) { _n++; fprintf(stderr, \"[rfom] func_0010A530 waits on job list 0x%08X%c\", (unsigned)R_3, 10); } }"
+]
+},
+{
+"at": 53,
+"ctx": "        ctx->lr = R_lr = R_0;",
+"rm": [
+"        return;"
+],
+"add": [
+"        { rfom_ftw_span(0x10A530u, _ftw0, ctx); return; }"
+]
+}
+],
+"func_0015E374": [
+{
+"at": 12,
+"ctx": "        uint32_t R_cr = ctx->cr;",
+"rm": [],
+"add": [
+"        uint64_t R_lr = ctx->lr;"
+]
+},
+{
+"at": 49,
+"ctx": "loc_0015E3F4:",
+"rm": [],
+"add": [
+"        if (!(uint32_t)R_3) { static int _n = 0; if (_n < 20) { _n++; fprintf(stderr, \"[RFOM] table lookup id=%d (0x%X) not found, lr=0x%08X\\n\", (int)(int32_t)R_7, (unsigned)R_7, (unsigned)R_lr); } }"
+]
+}
+],
+"func_001C326C": [
+{
+"at": 154,
+"ctx": "        /* nop */;",
+"rm": [],
+"add": [
+"        /* Resistance port: give up on a physics job batch that timed out (it never completes). */",
+"        if (rfom_phys_abandon(\"001C326C\")) { vm_write32(vm_read32_fast(R_30 + -0x7FF8), 0); goto loc_001C33D0; }"
+]
+}
+],
+"func_001C821C": [
+{
+"at": 44,
+"ctx": "        if (((R_cr >> 1) & 1)) goto loc_001C82CC;",
+"rm": [],
+"add": [
+"        rfom_jobwait_begin();"
+]
+},
+{
+"at": 49,
+"ctx": "        /* nop */;",
+"rm": [],
+"add": [
+"        if (R_3 == 0 && rfom_jobwait_spin((uint32_t)R_31)) ctx->gpr[3] = R_3 = 1;"
+]
+},
+{
+"at": 79,
+"ctx": "        /* nop */;",
+"rm": [],
+"add": [
+"        rfom_jobwait_begin();"
+]
+}
+],
+"func_001C9088": [
+{
+"at": 155,
+"ctx": "        /* nop */;",
+"rm": [],
+"add": [
+"        /* Resistance port: give up on a physics job batch that timed out (it never completes). */",
+"        if (rfom_phys_abandon(\"001C9088\")) { vm_write32(vm_read32_fast(R_30 + -0x7FF4), 0); goto loc_001C91F4; }"
+]
+}
+],
+"func_001E5D0C": [
+{
+"at": 30,
+"ctx": "        { uint32_t tmp = vm_read32_fast(R_30 + -0x7FC8); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[13] = ftmp; }",
+"rm": [
+"        { uint32_t tmp = vm_read32(R_9 + 0x4); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[0] = ftmp; }"
+],
+"add": [
+"        ctx->fpr[13] = rfom_limit_factor(ctx->fpr[13]);   /* v126: 0.9 -> 1.0 */",
+"        ctx->fpr[0] = rfom_dt_min(vm_read32(R_9 + 0x4));   /* v126: the clock's min step */"
+]
+},
+{
+"at": 42,
+"ctx": "loc_001E5D68:",
+"rm": [],
+"add": [
+"        /* v126: precise host wait (returns 0 = the game's own usleep loop) */",
+"        if (rfom_frame_wait(R_31, vm_read32_fast(R_30 + -0x7FB0))) goto loc_001E5DB4;"
+]
+}
+],
+"func_001EAA40": [
+{
+"at": 41,
+"ctx": "        { uint32_t tmp = vm_read32_fast(R_30 + -0x7FDC); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[10] = ftmp; }",
+"rm": [
+"        { uint32_t tmp = vm_read32(R_28 + 0x8); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[0] = ftmp; }"
+],
+"add": [
+"        ctx->fpr[0] = rfom_dt_max(vm_read32(R_28 + 0x8));   /* v126: max step */"
+]
+},
+{
+"at": 56,
+"ctx": "        ctx->fpr[13] = ctx->fpr[11];",
+"rm": [
+"        { uint32_t tmp = vm_read32(R_28 + 0x4); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[0] = ftmp; }"
+],
+"add": [
+"        ctx->fpr[0] = rfom_dt_min(vm_read32(R_28 + 0x4));   /* v126: min step */"
+]
+}
+],
+"func_00294318": [
+{
+"at": 26,
+"ctx": "        uint64_t _cs_31 = R_31;",
+"rm": [],
+"add": [
+"        const uint32_t _rfom_wag_out = (uint32_t)R_4; const double _rfom_wag_win = ctx->fpr[1];   /* v154/v159: grab escape, see project/stubs.cpp */"
+]
+},
+{
+"at": 125,
+"ctx": "loc_00294498:",
+"rm": [],
+"add": [
+"        rfom_waggle(_rfom_wag_out, _rfom_wag_win);"
+]
+}
+],
+"func_00296EBC": [
+{
+"at": 39,
+"ctx": "        uint64_t _cs_31 = R_31;",
+"rm": [],
+"add": [
+"        rfom_use_begin((uint32_t)R_3, vm_read32_fast(R_1 + 0x7C)); RfomUseScope _rfom_use;   /* v153: interact key (project/stubs.cpp) */"
+]
+}
+],
+"func_002A4D14": [
+{
+"at": 253,
+"ctx": "loc_002A5060:",
+"rm": [],
+"add": [
+"        rfom_mouselook_pre((uint32_t)R_31);   /* v149: direct mouse look -- stick no longer turns the view */"
+]
+},
+{
+"at": 277,
+"ctx": "loc_002A50B8:",
+"rm": [],
+"add": [
+"        rfom_mouselook((uint32_t)R_31);   /* v148: direct mouse look (project/stubs.cpp) */"
+]
+}
+],
+"func_002B12A0": [
+{
+"at": 338,
+"ctx": "        { float ftmp = (float)ctx->fpr[0]; uint32_t tmp; memcpy(&tmp, &ftmp, 4); vm_write32(R_31 + 0x4, tmp); }",
+"rm": [],
+"add": [
+"        rfom_pad_slot_note((uint32_t)R_28, (uint32_t)R_31);   /* v147g: input history slot per controller object */"
+]
+}
+],
+"func_00515E4C": [
+{
+"at": 12,
+"ctx": "        vm_write16(R_9 + 0x0, R_3);",
+"rm": [],
+"add": [
+"        rfom_snd_note(1, (uint32_t)R_3, (uint32_t)R_lr, (uint32_t)R_9);   /* v144 diag: speaker bus count */"
+]
+}
+],
+"func_0051E738": [
+{
+"at": 5,
+"ctx": "        ctx->gpr[9] = R_9 = vm_read32_fast(R_2 + -0x6D70);",
+"rm": [],
+"add": [
+"        rfom_snd_note(2, (uint32_t)R_3, (uint32_t)ctx->lr, (uint32_t)R_9);   /* v144 diag: speaker layout selected */"
+]
+}
+],
+"func_005223D8": [
+{
+"at": 25,
+"ctx": "}",
+"rm": [],
+"add": [
+"#undef _RCX_RL",
+"",
+"/* Resistance port (v122, diagnostic): the SCREAM synth tick (func_00522414,",
+" * syn_tick_timer_thread) mixes the cellAudio port-0 blocks on the PPU from the",
+" * output of a SPURS sound job list (wid 5) it kicks at the end of each tick",
+" * (func_00522ED0) and must find finished at the next (func_00522F44). Counters",
+" * reported every 5 s: \"[scream] ...\". Timebase ticks, 79.8 MHz. */",
+"static struct { unsigned ticks, waits, kicks, done, blocks, full, mixticks;",
+"                unsigned long long kick_t, lat_sum, lat_max, last_mix, gap_max, t0; } rfom_scr;",
+"static void rfom_scr_poll(uint32_t notdone)",
+"{",
+"    if (notdone) { rfom_scr.waits++; return; }",
+"    if (rfom_scr.kick_t) {",
+"        const unsigned long long d = ppu_timebase_now() - rfom_scr.kick_t;",
+"        rfom_scr.done++; rfom_scr.lat_sum += d; if (d > rfom_scr.lat_max) rfom_scr.lat_max = d;",
+"        rfom_scr.kick_t = 0;",
+"    }",
+"}",
+"static void rfom_scr_end(int blocks)",
+"{",
+"    const unsigned long long now = ppu_timebase_now();",
+"    rfom_scr.ticks++;",
+"    if (blocks > 0) {",
+"        rfom_scr.blocks += (unsigned)blocks; rfom_scr.mixticks++;",
+"        if (rfom_scr.last_mix && now - rfom_scr.last_mix > rfom_scr.gap_max) rfom_scr.gap_max = now - rfom_scr.last_mix;",
+"        rfom_scr.last_mix = now;",
+"    }",
+"    if (!rfom_scr.t0) rfom_scr.t0 = now;",
+"    if (now - rfom_scr.t0 < 5ull * 79800000ull) return;",
+"    const double ms = 1000.0 / 79800000.0;",
+"    fprintf(stderr, \"[scream] 5 s: %u ticks (%u mixed), %u blocks (937 = real time), %u stopped at a full batch | sound list: %u kicked, %u waits for it, latency avg %.1f ms max %.1f ms | longest gap between mixes %.1f ms%c\",",
+"            rfom_scr.ticks, rfom_scr.mixticks, rfom_scr.blocks, rfom_scr.full, rfom_scr.kicks, rfom_scr.waits,",
+"            rfom_scr.done ? rfom_scr.lat_sum * ms / rfom_scr.done : 0.0, rfom_scr.lat_max * ms, rfom_scr.gap_max * ms, 10);",
+"    const unsigned long long kt = rfom_scr.kick_t, lm = rfom_scr.last_mix;",
+"    memset(&rfom_scr, 0, sizeof rfom_scr);",
+"    rfom_scr.t0 = now; rfom_scr.kick_t = kt; rfom_scr.last_mix = lm;",
+"}"
+]
+}
+],
+"func_00522414": [
+{
+"at": 79,
+"ctx": "        /* nop */;",
+"rm": [],
+"add": [
+"        if ((int32_t)R_3 == 0) rfom_scr.full++;"
+]
+},
+{
+"at": 191,
+"ctx": "loc_00522680:",
+"rm": [],
+"add": [
+"        rfom_scr_end((int)(int32_t)R_27);"
+]
+}
+],
+"func_00522ED0": [
+{
+"at": 8,
+"ctx": "        uint64_t R_lr = ctx->lr;",
+"rm": [],
+"add": [
+"        rfom_scr.kicks++; rfom_scr.kick_t = ppu_timebase_now();"
+]
+}
+],
+"func_00522F44": [
+{
+"at": 55,
+"ctx": "        ctx->lr = R_lr = 0x00522FB0; func_00522F08(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+"rm": [],
+"add": [
+"        rfom_scr_poll((uint32_t)R_3);"
+]
+}
+],
+"func_0052904C": [
+{
+"at": 16,
+"ctx": "        ctx->gpr[11] = R_11 = (int64_t)(int32_t)(0);",
+"rm": [
+"        vm_write16(R_10 + 0x1E, R_0);"
+],
+"add": []
+},
+{
+"at": 18,
+"ctx": "        ctx->gpr[8] = R_8 = (int64_t)(int32_t)(0);",
+"rm": [
+"        vm_write16(R_10 + 0x14, R_0);"
+],
+"add": []
+},
+{
+"at": 20,
+"ctx": "        ctx->gpr[9] = R_9 = ppc_rldicl(R_9, 0, 32);",
+"rm": [
+"        vm_write16(R_10 + 0x12, R_11);",
+"        vm_write16(R_10 + 0x10, R_11);",
+"        vm_write16(R_10 + 0x16, R_0);",
+"        vm_write16(R_10 + 0x18, R_0);",
+"        vm_write16(R_10 + 0x1A, R_0);",
+"        vm_write16(R_10 + 0x1C, R_0);",
+"loc_0052908C:",
+"        ctx->gpr[0] = R_0 = R_9 + (int64_t)(8);",
+"        vm_write64(R_9 + 0x0, R_8);",
+"        ctx->gpr[9] = R_9 = ppc_rldicl(R_0, 0, 32);",
+"        if (((ctx->ctr = --R_ctr) != 0)) goto loc_0052908C;"
+],
+"add": [
+"        /* Resistance port v84: the header/slot/entry stores above and the entry loop, as one atomic line write (project/stubs.cpp) */",
+"        rfom_joblist_reset((uint32_t)R_10);",
+"        ctx->gpr[0] = R_0 = (uint32_t)(R_10 + 0x80); ctx->gpr[9] = R_9 = R_0; ctx->ctr = R_ctr = 0;"
+]
+}
+],
+"func_0052A4D0": [
+{
+"at": 16,
+"ctx": "        ctx->gpr[11] = R_11 = (int64_t)(int32_t)(0);",
+"rm": [
+"        vm_write16(R_10 + 0x1E, R_0);"
+],
+"add": []
+},
+{
+"at": 18,
+"ctx": "        ctx->gpr[8] = R_8 = (int64_t)(int32_t)(0);",
+"rm": [
+"        vm_write16(R_10 + 0x14, R_0);"
+],
+"add": []
+},
+{
+"at": 21,
+"ctx": "        vm_write32(R_3 + 0x24, R_11);",
+"rm": [
+"        vm_write16(R_10 + 0x12, R_11);",
+"        vm_write16(R_10 + 0x10, R_11);",
+"        vm_write16(R_10 + 0x16, R_0);",
+"        vm_write16(R_10 + 0x18, R_0);",
+"        vm_write16(R_10 + 0x1A, R_0);",
+"        vm_write16(R_10 + 0x1C, R_0);",
+"loc_0052A514:",
+"        ctx->gpr[0] = R_0 = R_9 + (int64_t)(8);",
+"        vm_write64(R_9 + 0x0, R_8);",
+"        ctx->gpr[9] = R_9 = ppc_rldicl(R_0, 0, 32);",
+"        if (((ctx->ctr = --R_ctr) != 0)) goto loc_0052A514;"
+],
+"add": [
+"        /* Resistance port v84: the header/slot/entry stores above and the entry loop, as one atomic line write (project/stubs.cpp) */",
+"        rfom_joblist_reset((uint32_t)R_10);",
+"        ctx->gpr[0] = R_0 = (uint32_t)(R_10 + 0x80); ctx->gpr[9] = R_9 = R_0; ctx->ctr = R_ctr = 0;"
+]
+}
+],
+"func_0052A564": [
+{
+"at": 16,
+"ctx": "        ctx->gpr[11] = R_11 = (int64_t)(int32_t)(0);",
+"rm": [
+"        vm_write16(R_10 + 0x1E, R_0);"
+],
+"add": []
+},
+{
+"at": 18,
+"ctx": "        ctx->gpr[8] = R_8 = (int64_t)(int32_t)(0);",
+"rm": [
+"        vm_write16(R_10 + 0x14, R_0);"
+],
+"add": []
+},
+{
+"at": 20,
+"ctx": "        ctx->gpr[9] = R_9 = ppc_rldicl(R_9, 0, 32);",
+"rm": [
+"        vm_write16(R_10 + 0x12, R_11);",
+"        vm_write16(R_10 + 0x10, R_11);",
+"        vm_write16(R_10 + 0x16, R_0);",
+"        vm_write16(R_10 + 0x18, R_0);",
+"        vm_write16(R_10 + 0x1A, R_0);",
+"        vm_write16(R_10 + 0x1C, R_0);",
+"loc_0052A5A4:",
+"        ctx->gpr[0] = R_0 = R_9 + (int64_t)(8);",
+"        vm_write64(R_9 + 0x0, R_8);",
+"        ctx->gpr[9] = R_9 = ppc_rldicl(R_0, 0, 32);",
+"        if (((ctx->ctr = --R_ctr) != 0)) goto loc_0052A5A4;"
+],
+"add": [
+"        /* Resistance port v84: the header/slot/entry stores above and the entry loop, as one atomic line write (project/stubs.cpp) */",
+"        rfom_joblist_reset((uint32_t)R_10);",
+"        ctx->gpr[0] = R_0 = (uint32_t)(R_10 + 0x80); ctx->gpr[9] = R_9 = R_0; ctx->ctr = R_ctr = 0;"
+]
+}
+],
+"func_005401BC": [
+{
+"at": 26,
+"ctx": "        vm_write64_stk(R_1 + 0x2F0, R_5);",
+"rm": [
+"        ctx->lr = R_lr = 0x005401F4; func_00658718(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;"
+],
+"add": [
+"        /* v145: guest setjmp (Lua's protected call); see rfom_jb_arm. */",
+"        if (setjmp(*rfom_jb_arm(ctx)) == 0) {",
+"            ctx->lr = R_lr = 0x005401F4; func_00658718(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+"        } else { rfom_jb_landed(ctx); _RCX_RL; }"
+]
+}
+],
+"func_005E9474": [
+{
+"at": 8,
+"ctx": "        ctx->gpr[0] = R_0 = R_lr;",
+"rm": [
+"        ctx->gpr[4] = R_4 = (int64_t)(int32_t)(0);"
+],
+"add": [
+"        ctx->gpr[4] = R_4 = rfom_movie_evwait_us();   /* v130: was 0 (wait forever); see project/stubs.cpp */"
+]
+}
+],
+"func_00621A44": [
+{
+"at": 200,
+"ctx": "}",
+"rm": [],
+"add": [
+"#undef _RCX_RL",
+"",
+"/* Resistance port (v121, diagnostic): libmixer surround-mixer thread counters",
+" * (func_00621CA8), reported every 5 s. Timebase ticks, 79.8 MHz. */",
+"static struct { unsigned long long ev, everr, writes, passes, wait, lock1, lock2, cb, wr, t_ev, t0;",
+"                unsigned lock1fail, lock2fail; } rfom_smx;",
+"static void rfom_smx_report(void)",
+"{",
+"    const unsigned long long now = ppu_timebase_now();",
+"    if (!rfom_smx.t0) rfom_smx.t0 = now;",
+"    if (now - rfom_smx.t0 < 5ull * 79800000ull) return;",
+"    const double ms = 1000.0 / 79800000.0;",
+"    fprintf(stderr, \"[surmix] 5 s: %llu events (%llu err), %llu passes, %llu blocks written | ms: waiting %.0f, lock1 %.1f (%u fail), lock2 %.1f (%u fail), callback %.1f, write %.1f%c\",",
+"            rfom_smx.ev, rfom_smx.everr, rfom_smx.passes, rfom_smx.writes, rfom_smx.wait * ms,",
+"            rfom_smx.lock1 * ms, rfom_smx.lock1fail, rfom_smx.lock2 * ms, rfom_smx.lock2fail,",
+"            rfom_smx.cb * ms, rfom_smx.wr * ms, 10);",
+"    memset(&rfom_smx, 0, sizeof rfom_smx); rfom_smx.t0 = now;",
+"}"
+]
+}
+],
+"func_00621CA8": [
+{
+"at": 173,
+"ctx": "        ctx->gpr[3] = R_3 = vm_read32(R_29 + 0x0);",
+"rm": [
+"        lv2_syscall(ctx); _RCX_RL;"
+],
+"add": [
+"        { const unsigned long long _t = ppu_timebase_now(); lv2_syscall(ctx); _RCX_RL;",
+"          rfom_smx.wait += ppu_timebase_now() - _t; if ((int32_t)R_3 == 0) rfom_smx.ev++; else rfom_smx.everr++;",
+"          rfom_smx.t_ev = ppu_timebase_now(); rfom_smx_report(); }"
+]
+},
+{
+"at": 188,
+"ctx": "        ctx->gpr[3] = R_3 = R_30 | R_30;",
+"rm": [],
+"add": [
+"        { const unsigned long long _t = ppu_timebase_now();"
+]
+},
+{
+"at": 189,
+"ctx": "        ctx->lr = R_lr = 0x00621EBC; func_0066A608(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+"rm": [],
+"add": [
+"          rfom_smx.lock1 += ppu_timebase_now() - _t; if ((int32_t)R_3 != 0) rfom_smx.lock1fail++; }"
+]
+},
+{
+"at": 215,
+"ctx": "        ctx->gpr[4] = R_4 = (int64_t)(int32_t)(0x64);",
+"rm": [],
+"add": [
+"        { const unsigned long long _t = ppu_timebase_now();"
+]
+},
+{
+"at": 216,
+"ctx": "        ctx->lr = R_lr = 0x00621F20; func_0066A608(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+"rm": [],
+"add": [
+"          rfom_smx.lock2 += ppu_timebase_now() - _t; if ((int32_t)R_3 != 0) rfom_smx.lock2fail++; }"
+]
+},
+{
+"at": 256,
+"ctx": "        ctx->gpr[2] = R_2 = vm_read32(R_11 + 0x4);",
+"rm": [],
+"add": [
+"        { const unsigned long long _t = ppu_timebase_now();"
+]
+},
+{
+"at": 257,
+"ctx": "        ctx->lr = R_lr = 0x00621FBC; ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+"rm": [],
+"add": [
+"          rfom_smx.cb += ppu_timebase_now() - _t; }"
+]
+},
+{
+"at": 263,
+"ctx": "        ctx->gpr[4] = R_4 = ppc_rldicl(R_29, 0, 32);",
+"rm": [],
+"add": [
+"        rfom_smx.writes++;",
+"        { const unsigned long long _t = ppu_timebase_now();"
+]
+},
+{
+"at": 264,
+"ctx": "        ctx->lr = R_lr = 0x00621FD8; func_00620BA8(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+"rm": [],
+"add": [
+"          rfom_smx.wr += ppu_timebase_now() - _t; }"
+]
+},
+{
+"at": 267,
+"ctx": "loc_00621FE0:",
+"rm": [],
+"add": [
+"        rfom_smx.passes++;"
+]
+}
+],
+"func_0065883C": [
+{
+"at": 1,
+"ctx": "void func_0065883C(ppu_context* ctx) {",
+"rm": [],
+"add": [
+"        const uint32_t _jb_ea = ((uint32_t)ctx->gpr[3] + 15u) & ~15u;   /* v145 */"
+]
+},
+{
+"at": 106,
+"ctx": "        { uint64_t ca = (R_xer >> 29) & 1; uint64_t result = R_4 + ca; ctx->xer = R_xer = (R_xer & ~(1u << 29)) | ((result < R_4) ? (1u << 29) : 0); ctx->gpr[3] = R_3 = result; }",
+"rm": [],
+"add": [
+"        rfom_jb_jump(ctx, _jb_ea);   /* v145: back to the setjmp frame (does not return if found) */"
+]
+}
+]
+},
+"preamble": [
+"extern \"C\" unsigned long long rfom_ftw_now(void);",
+"extern \"C\" void rfom_ftw_span(unsigned tag, unsigned long long t0, ppu_context* ctx);",
+"extern \"C\" void rfom_flagwait_begin(void);",
+"extern \"C\" int rfom_flagwait_timeout(const char* where);",
+"extern \"C\" void rfom_ld_open(uint32_t job);",
+"extern \"C\" void rfom_ld_poll(uint32_t job, int when);",
+"extern \"C\" void rfom_text_patch(uint32_t file_obj);",
+"extern \"C\" double rfom_fov_adjust(double fov_deg);",
+"extern \"C\" void rfom_fov_note(uint32_t cam, double fov_deg);",
+"extern \"C\" uint32_t rfom_speakers(uint32_t configured);",
+"extern \"C\" volatile uint32_t rfom_pad_out_ea;",
+"extern \"C\" void rfom_snd_note(int kind, uint32_t v, uint32_t lr, uint32_t extra);",
+"extern \"C\" void rfom_fov_lod_fix(uint32_t cam, double fov_deg, double aspect);",
+"extern \"C\" void rfom_ld_vret(int32_t r);",
+"extern \"C\" void rfom_ld_vcall(uint32_t fn, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t obj);",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_6 = ctx->gpr[6]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_16 = ctx->gpr[16]; R_17 = ctx->gpr[17]; R_18 = ctx->gpr[18]; R_19 = ctx->gpr[19]; R_20 = ctx->gpr[20]; R_21 = ctx->gpr[21]; R_22 = ctx->gpr[22]; R_23 = ctx->gpr[23]; R_24 = ctx->gpr[24]; R_25 = ctx->gpr[25]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; } while (0)",
+"extern \"C\" int rfom_phys_abandon(const char* where);",
+"extern \"C\" void rfom_jobwait_begin(void);",
+"extern \"C\" int rfom_jobwait_spin(uint32_t obj);",
+"extern \"C\" double rfom_dt_min(uint32_t bits);      /* v126: frame rate (project/stubs.cpp) */",
+"extern \"C\" double rfom_dt_max(uint32_t bits);",
+"extern \"C\" double rfom_limit_factor(double f);",
+"extern \"C\" int rfom_frame_wait(uint64_t target_ticks, uint32_t last_ea);",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_xer = ctx->xer; } while (0)",
+"extern \"C\" void rfom_use_begin(uint32_t player, uint32_t mask);",
+"extern \"C\" void rfom_use_end(void);",
+"extern \"C\" void rfom_waggle(uint32_t out_ea, double window_s);",
+"struct RfomUseScope { ~RfomUseScope() { rfom_use_end(); } };",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_6 = ctx->gpr[6]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_14 = ctx->gpr[14]; R_15 = ctx->gpr[15]; R_16 = ctx->gpr[16]; R_17 = ctx->gpr[17]; R_18 = ctx->gpr[18]; R_19 = ctx->gpr[19]; R_20 = ctx->gpr[20]; R_21 = ctx->gpr[21]; R_22 = ctx->gpr[22]; R_23 = ctx->gpr[23]; R_24 = ctx->gpr[24]; R_25 = ctx->gpr[25]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_ctr = ctx->ctr; R_xer = ctx->xer; } while (0)",
+"extern \"C\" void rfom_pad_slot_note(uint32_t obj, uint32_t slot);",
+"extern \"C\" void rfom_mouselook(uint32_t player);",
+"extern \"C\" void rfom_mouselook_pre(uint32_t player);",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_24 = ctx->gpr[24]; R_25 = ctx->gpr[25]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_ctr = ctx->ctr; R_xer = ctx->xer; } while (0)",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_6 = ctx->gpr[6]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_12 = ctx->gpr[12]; R_23 = ctx->gpr[23]; R_24 = ctx->gpr[24]; R_25 = ctx->gpr[25]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_ctr = ctx->ctr; R_xer = ctx->xer; } while (0)",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_9 = ctx->gpr[9]; R_11 = ctx->gpr[11]; R_30 = ctx->gpr[30]; R_cr = ctx->cr; R_ctr = ctx->ctr; R_xer = ctx->xer; } while (0)",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_6 = ctx->gpr[6]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_ctr = ctx->ctr; R_xer = ctx->xer; } while (0)",
+"extern \"C\" void rfom_joblist_reset(uint32_t list);",
+"#include <setjmp.h>",
+"extern \"C\" jmp_buf* rfom_jb_arm(ppu_context* ctx);",
+"extern \"C\" void rfom_jb_landed(ppu_context* ctx);",
+"extern \"C\" void rfom_jb_jump(ppu_context* ctx, uint32_t buf_ea);",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_6 = ctx->gpr[6]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_12 = ctx->gpr[12]; R_21 = ctx->gpr[21]; R_22 = ctx->gpr[22]; R_23 = ctx->gpr[23]; R_24 = ctx->gpr[24]; R_25 = ctx->gpr[25]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_xer = ctx->xer; } while (0)",
+"extern \"C\" uint64_t rfom_movie_evwait_us(void);   /* v130 */",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_6 = ctx->gpr[6]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_23 = ctx->gpr[23]; R_24 = ctx->gpr[24]; R_25 = ctx->gpr[25]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_xer = ctx->xer; } while (0)",
+"#define _RCX_RL do { R_0 = ctx->gpr[0]; R_1 = ctx->gpr[1]; R_2 = ctx->gpr[2]; R_3 = ctx->gpr[3]; R_4 = ctx->gpr[4]; R_5 = ctx->gpr[5]; R_6 = ctx->gpr[6]; R_7 = ctx->gpr[7]; R_8 = ctx->gpr[8]; R_9 = ctx->gpr[9]; R_10 = ctx->gpr[10]; R_11 = ctx->gpr[11]; R_12 = ctx->gpr[12]; R_19 = ctx->gpr[19]; R_20 = ctx->gpr[20]; R_21 = ctx->gpr[21]; R_22 = ctx->gpr[22]; R_23 = ctx->gpr[23]; R_24 = ctx->gpr[24]; R_25 = ctx->gpr[25]; R_26 = ctx->gpr[26]; R_27 = ctx->gpr[27]; R_28 = ctx->gpr[28]; R_29 = ctx->gpr[29]; R_30 = ctx->gpr[30]; R_31 = ctx->gpr[31]; R_cr = ctx->cr; R_lr = ctx->lr; R_xer = ctx->xer; } while (0)"
+],
+"header": [
+{
+"at": 23,
+"ctx": "#    include <atomic>",
+"rm": [
+"#    define PPU_FENCE(o) std::atomic_thread_fence(std::memory_order_##o)"
+],
+"add": [
+"#    define PPU_FENCE_STD(o) std::atomic_thread_fence(std::memory_order_##o)"
+]
+},
+{
+"at": 26,
+"ctx": "#    include <stdatomic.h>",
+"rm": [
+"#    define PPU_FENCE(o) atomic_thread_fence(memory_order_##o)"
+],
+"add": [
+"#    define PPU_FENCE_STD(o) atomic_thread_fence(memory_order_##o)"
+]
+},
+{
+"at": 28,
+"ctx": "#  endif",
+"rm": [],
+"add": [
+"/* Resistance port (v141): the full barrier (PPC sync) as a locked no-op",
+" * read-modify-write of the stack top -- what Linux uses for smp_mb() on",
+" * x86-64. Same StoreLoad ordering for ordinary memory as mfence, at a",
+" * fraction of the cost on Zen 2; Fall of Man's job-list helpers",
+" * (func_005290DC & co., ~7% of the main thread) run one per call.",
+" * PPU_FENCE_MFENCE=1 at build time keeps mfence. */",
+"#  if (defined(__x86_64__) || defined(_M_X64)) && (defined(__clang__) || defined(__GNUC__)) && !defined(PPU_FENCE_MFENCE)",
+"#    define PPU_FENCE_seq_cst() __asm__ __volatile__(\"lock orl $0,(%%rsp)\" ::: \"memory\", \"cc\")",
+"#  else",
+"#    define PPU_FENCE_seq_cst() PPU_FENCE_STD(seq_cst)",
+"#  endif",
+"#  define PPU_FENCE_acq_rel() PPU_FENCE_STD(acq_rel)",
+"#  define PPU_FENCE_acquire() PPU_FENCE_STD(acquire)",
+"#  define PPU_FENCE_release() PPU_FENCE_STD(release)",
+"#  define PPU_FENCE_consume() PPU_FENCE_STD(acquire)",
+"#  define PPU_FENCE_relaxed() ((void)0)",
+"#  define PPU_FENCE(o) PPU_FENCE_##o()"
+]
+},
+{
+"at": 99,
+"ctx": "#endif",
+"rm": [],
+"add": [
+"#ifdef PPU_FIXED_BOUNDS",
+"extern uint8_t* const vm_base;   /* v163: set once at boot, before any lifted code runs */",
+"#else"
+]
+},
+{
+"at": 100,
+"ctx": "extern uint8_t* vm_base;",
+"rm": [],
+"add": [
+"#endif"
+]
+},
+{
+"at": 134,
+"ctx": "    (void)n;",
+"rm": [],
+"add": [
+"#ifdef PPU_FIXED_BOUNDS",
+"    /* v163: the bounds as immediates (main.cpp maps the full space, ppu_vm_size",
+"     * = 0xE0000000; the gcm ref-poll word is ppu_hle_inject_base 0x20000000 +",
+"     * 0x2008 -- main.cpp checks both at boot). No global loads per access. */",
+"    return __builtin_expect((uint32_t)(ea - 0x10000u) < 0xE0000000u - 8u - 0x10000u, 1) &&",
+"           __builtin_expect(ea != 0x20002008u, 1);",
+"#else"
+]
+},
+{
+"at": 136,
+"ctx": "           __builtin_expect(ea != vm_inl_poll, 1);",
+"rm": [],
+"add": [
+"#endif"
+]
+},
+{
+"at": 137,
+"ctx": "}",
+"rm": [],
+"add": [
+"#ifdef PPU_FIXED_BOUNDS",
+"/* v163: the out-of-line accessors behind a preserve_most wrapper",
+" * (ppu_loader.cpp): the rare slow path no longer clobbers the caller's",
+" * registers, so the fast path keeps its values in registers. */",
+"#ifdef __cplusplus",
+"extern \"C\" {",
+"#endif",
+"__attribute__((preserve_most)) uint8_t  vm_read8_pm (uint64_t a);",
+"__attribute__((preserve_most)) uint16_t vm_read16_pm(uint64_t a);",
+"__attribute__((preserve_most)) uint32_t vm_read32_pm(uint64_t a);",
+"__attribute__((preserve_most)) uint64_t vm_read64_pm(uint64_t a);",
+"__attribute__((preserve_most)) void vm_write8_pm (uint64_t a, uint8_t v);",
+"__attribute__((preserve_most)) void vm_write16_pm(uint64_t a, uint16_t v);",
+"__attribute__((preserve_most)) void vm_write32_pm(uint64_t a, uint32_t v);",
+"__attribute__((preserve_most)) void vm_write64_pm(uint64_t a, uint64_t v);",
+"#ifdef __cplusplus",
+"}",
+"#endif",
+"#define VM_SLOW_RD(w, a)    vm_read##w##_pm(a)",
+"#define VM_SLOW_WR(w, a, v) vm_write##w##_pm((a), (v))",
+"#else",
+"#define VM_SLOW_RD(w, a)    vm_read##w(a)",
+"#define VM_SLOW_WR(w, a, v) vm_write##w((a), (v))",
+"#endif"
+]
+},
+{
+"at": 141,
+"ctx": "    if (vm_inl_ok(ea, 1)) return __atomic_load_n(vm_base + ea, __ATOMIC_RELAXED);",
+"rm": [
+"    return vm_read8(a);"
+],
+"add": [
+"    return VM_SLOW_RD(8, a);"
+]
+},
+{
+"at": 151,
+"ctx": "        return __builtin_bswap16(v); }",
+"rm": [
+"    return vm_read16(a);"
+],
+"add": [
+"    return VM_SLOW_RD(16, a);"
+]
+},
+{
+"at": 161,
+"ctx": "        return __builtin_bswap32(v); }",
+"rm": [
+"    return vm_read32(a);"
+],
+"add": [
+"    return VM_SLOW_RD(32, a);"
+]
+},
+{
+"at": 171,
+"ctx": "        return __builtin_bswap64(v); }",
+"rm": [
+"    return vm_read64(a);"
+],
+"add": [
+"    return VM_SLOW_RD(64, a);"
+]
+},
+{
+"at": 191,
+"ctx": "extern int vm_inline_st_ok;",
+"rm": [],
+"add": [
+"#ifdef PPU_FIXED_BOUNDS",
+"extern unsigned char* const g_spu_coh_bitmap_p;   /* v163: set statically, never changes */",
+"extern volatile int g_spu_coh_stack;              /* v163: an SPU reserved a PPU-stack line */",
+"#else"
+]
+},
+{
+"at": 192,
+"ctx": "extern unsigned char* g_spu_coh_bitmap_p;",
+"rm": [],
+"add": [
+"#endif"
+]
+},
+{
+"at": 198,
+"ctx": "{",
+"rm": [],
+"add": [
+"#ifdef PPU_FIXED_BOUNDS",
+"    if (!vm_inl_ok(ea, n)) return 0;",
+"#else"
+]
+},
+{
+"at": 199,
+"ctx": "    if (!__builtin_expect(vm_inline_st_ok, 1) || !vm_inl_ok(ea, n)) return 0;",
+"rm": [],
+"add": [
+"#endif"
+]
+},
+{
+"at": 210,
+"ctx": "    if (vm_st_fast(ea, 1)) { __atomic_store_n(vm_base + ea, v, __ATOMIC_RELAXED); return; }",
+"rm": [
+"    vm_write8(a, v);"
+],
+"add": [
+"    VM_SLOW_WR(8, a, v);"
+]
+},
+{
+"at": 219,
+"ctx": "        return; }",
+"rm": [
+"    vm_write16(a, v);"
+],
+"add": [
+"    VM_SLOW_WR(16, a, v);"
+]
+},
+{
+"at": 228,
+"ctx": "        return; }",
+"rm": [
+"    vm_write32(a, v);"
+],
+"add": [
+"    VM_SLOW_WR(32, a, v);"
+]
+},
+{
+"at": 237,
+"ctx": "        return; }",
+"rm": [
+"    vm_write64(a, v);"
+],
+"add": [
+"    VM_SLOW_WR(64, a, v);"
+]
+},
+{
+"at": 244,
+"ctx": "#define vm_write64(a, v) vm_write64_inl((a), (v))",
+"rm": [],
+"add": [
+"#endif",
+"",
+"/* v163 (Resistance port): unchecked accessors for accesses the lifter-output",
+" * post-pass (tools/ppu_fastmem.py) proved ordinary: stack (R_1), TOC (R_2) and",
+" * TOC-derived constant-pool (R_30) addresses. These can never be the null",
+" * page, raw-SPU MMIO, the gcm ref-poll word or past the end of the VM, so the",
+" * span / poll / store-ok tests and the out-of-line fallback -- whose call",
+" * forced spills around every access -- are dropped. Stack stores skip the SPU",
+" * reservation bitmap too (no SPU job reserves PPU stack lines; spu_coherency.c",
+" * logs it if one ever does -- then build with -DPPU_STACK_COH). PPU_NO_FASTMEM",
+" * builds the old checked path. */",
+"#ifndef PPU_NO_FASTMEM",
+"static inline uint8_t  vm_read8_fast (uint64_t a) { return vm_base[(uint32_t)a]; }",
+"static inline uint16_t vm_read16_fast(uint64_t a) { uint16_t v; memcpy(&v, vm_base + (uint32_t)a, 2); return __builtin_bswap16(v); }",
+"static inline uint32_t vm_read32_fast(uint64_t a) { uint32_t v; memcpy(&v, vm_base + (uint32_t)a, 4); return __builtin_bswap32(v); }",
+"static inline uint64_t vm_read64_fast(uint64_t a) { uint64_t v; memcpy(&v, vm_base + (uint32_t)a, 8); return __builtin_bswap64(v); }",
+"static inline int vm_stk_coh_hit(uint32_t ea, uint32_t n)",
+"{",
+"#if defined(PPU_FIXED_BOUNDS) && !defined(PPU_STACK_COH)",
+"    /* v163: no check at all. An SPU reservation on a PPU stack line would need",
+"     * one; spu_coherency.c logs \"[coh] SPU reservation on a PPU stack line\"",
+"     * if that ever happens (build with -DPPU_STACK_COH then). */",
+"    (void)ea; (void)n; return 0;",
+"#elif defined(PPU_FIXED_BOUNDS)",
+"    if (__builtin_expect(!g_spu_coh_stack, 1)) return 0;   /* no SPU has reserved a stack line */",
+"#else",
+"    if (__builtin_expect(!g_spu_coh_armed, 0)) return 0;",
+"#endif",
+"    const uint32_t l0 = ea >> 7, l1 = (ea + n - 1) >> 7;",
+"    if ((g_spu_coh_bitmap_p[l0 >> 3] >> (l0 & 7)) & 1u) return 1;",
+"    return l1 != l0 && ((g_spu_coh_bitmap_p[l1 >> 3] >> (l1 & 7)) & 1u);",
+"}",
+"static inline void vm_write8_stk(uint64_t a, uint8_t v)",
+"{ const uint32_t ea = (uint32_t)a; if (__builtin_expect(vm_stk_coh_hit(ea, 1), 0)) { (vm_write8)(a, v); return; } vm_base[ea] = v; }",
+"static inline void vm_write16_stk(uint64_t a, uint16_t v)",
+"{ const uint32_t ea = (uint32_t)a; if (__builtin_expect(vm_stk_coh_hit(ea, 2), 0)) { (vm_write16)(a, v); return; }",
+"  const uint16_t s = __builtin_bswap16(v); memcpy(vm_base + ea, &s, 2); }",
+"static inline void vm_write32_stk(uint64_t a, uint32_t v)",
+"{ const uint32_t ea = (uint32_t)a; if (__builtin_expect(vm_stk_coh_hit(ea, 4), 0)) { (vm_write32)(a, v); return; }",
+"  const uint32_t s = __builtin_bswap32(v); memcpy(vm_base + ea, &s, 4); }",
+"static inline void vm_write64_stk(uint64_t a, uint64_t v)",
+"{ const uint32_t ea = (uint32_t)a; if (__builtin_expect(vm_stk_coh_hit(ea, 8), 0)) { (vm_write64)(a, v); return; }",
+"  const uint64_t s = __builtin_bswap64(v); memcpy(vm_base + ea, &s, 8); }",
+"#else",
+"#define vm_read8_fast(a)  vm_read8(a)",
+"#define vm_read16_fast(a) vm_read16(a)",
+"#define vm_read32_fast(a) vm_read32(a)",
+"#define vm_read64_fast(a) vm_read64(a)",
+"#define vm_write8_stk(a, v)  vm_write8((a), (v))",
+"#define vm_write16_stk(a, v) vm_write16((a), (v))",
+"#define vm_write32_stk(a, v) vm_write32((a), (v))",
+"#define vm_write64_stk(a, v) vm_write64((a), (v))"
+]
+}
+]
+}

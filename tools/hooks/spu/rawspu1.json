@@ -1,0 +1,33 @@
+{
+"pre": {},
+"post": {
+"rawspu1_spu_func_000056E8": [
+{
+"at": 1,
+"ctx": "void rawspu1_spu_func_000056E8(spu_context* ctx) {",
+"rm": [
+"        ctx->stop_code = 0x0u; ctx->status = SPU_STATUS_STOPPED_BY_STOP; spu_stop(ctx); return;"
+],
+"add": [
+"        /* branch hint (ignored) */;",
+"        /* branch hint (ignored) */;",
+"        { SPU_HOP(ctx, 0x56F0, rawspu1_spu_func_000056F0); }"
+]
+}
+],
+"rawspu1_spu_func_000056F0": [
+{
+"at": 1,
+"ctx": "void rawspu1_spu_func_000056F0(spu_context* ctx) {",
+"rm": [],
+"add": [
+"        u128 S_0 = ctx->gpr[0];",
+"        u128 S_64 = ctx->gpr[64];",
+"        /* branch hint (ignored) */;",
+"        ctx->gpr[0] = S_0 = spu_fma(S_0, S_64, S_0);"
+]
+}
+]
+},
+"preamble": []
+}

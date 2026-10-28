@@ -1,0 +1,98 @@
+{
+"pre": {
+"jobmod_2df26beffbab_e10978_spu_func_00011DA8": [
+{
+"at": 102,
+"ctx": "        ctx->gpr[104] = spu_rotmi(ctx->gpr[4], -7);",
+"rm": [],
+"add": [
+"        /* Resistance port: solver-guard. r104 is the item count of the loop at",
+"         * 0x12F84, whose counter is a 16-bit halfword: a count above 0xFFFF can",
+"         * never be reached and the job spins forever (York freeze). Only a few",
+"         * hundred items fit in local store, so a count above 4096 is corrupt",
+"         * input: process nothing instead. SOLVER_GUARD=0 disables. */",
+"        { static int en = -1; if (en < 0) { const char* e = getenv(\"SOLVER_GUARD\"); en = e ? atoi(e) : 1; }",
+"          /* v80 diag: the input header of the first few GOOD solver runs, to learn",
+"           * the layout a corrupt one is compared against. */",
+"          if (en && ctx->gpr[104]._u32[0] <= 4096u) {",
+"              static volatile long g = 0;",
+"              if (g < 4) { g++;",
+"                  const uint8_t* q = &ctx->ls[ctx->gpr[82]._u32[0] & SPU_LS_MASK & ~0xFu];",
+"                  fprintf(stderr, \"[solver-good] count=%u in@LS 0x%05X:\", ctx->gpr[104]._u32[0], ctx->gpr[82]._u32[0] & SPU_LS_MASK);",
+"                  for (int i = 0; i < 0x50; i += 4) fprintf(stderr, \" %02X%02X%02X%02X\", q[i], q[i+1], q[i+2], q[i+3]);",
+"                  fprintf(stderr, \"\\n\"); } }",
+"          if (en && ctx->gpr[104]._u32[0] > 4096u) {",
+"              static volatile long n = 0;",
+"              if (n++ < 16) fprintf(stderr, \"[solver-guard] corrupt item count 0x%X -> 0 (skipping)\\n\", ctx->gpr[104]._u32[0]);",
+"              /* v78 diag: first 3 -> logs/solver_N.bin (LS), _regs.txt (regs + DMA ring),",
+"               * _ea.bin (current main-memory contents of every GET source in the ring:",
+"               * records of u32 ea, u32 size, bytes). */",
+"              if (n <= 3) {",
+"                  extern uint8_t* vm_base;",
+"                  extern SPU_THREAD_LOCAL spu_dma_trace_ent g_spu_dma_ring[512];",
+"                  extern SPU_THREAD_LOCAL uint32_t g_spu_dma_ring_n;",
+"                  char fnm[64]; FILE* f;",
+"                  snprintf(fnm, sizeof fnm, \"logs/solver_%ld.bin\", (long)n);",
+"                  if ((f = fopen(fnm, \"wb\"))) { fwrite(ctx->ls, 1, SPU_LS_SIZE, f); fclose(f); }",
+"                  snprintf(fnm, sizeof fnm, \"logs/solver_%ld_regs.txt\", (long)n);",
+"                  if ((f = fopen(fnm, \"w\"))) {",
+"                      fprintf(f, \"img=%d pc=0x%05X spu_id=%u count=0x%X\\n\", ctx->image_id, (unsigned)ctx->pc & SPU_LS_MASK, ctx->spu_id, ctx->gpr[104]._u32[0]);",
+"                      for (int r = 0; r < 128; r++)",
+"                          fprintf(f, \"r%d %08X %08X %08X %08X\\n\", r, ctx->gpr[r]._u32[0], ctx->gpr[r]._u32[1], ctx->gpr[r]._u32[2], ctx->gpr[r]._u32[3]);",
+"                      uint32_t dn = g_spu_dma_ring_n, k0 = dn > 512 ? dn - 512 : 0;",
+"                      fprintf(f, \"dma (oldest first, total %u):\\n\", dn);",
+"                      for (uint32_t k = k0; k < dn; k++) { spu_dma_trace_ent* te = &g_spu_dma_ring[k & 511u];",
+"                          fprintf(f, \"  #%u cmd=%02X lsa=0x%05X ea=0x%08X size=0x%X\\n\", k, te->cmd & 0xFF, te->lsa, te->ea, te->size); }",
+"                      fclose(f);",
+"                  }",
+"                  snprintf(fnm, sizeof fnm, \"logs/solver_%ld_trace.txt\", (long)n);",
+"                  spu_phys_trace_dump(fnm);",
+"                  snprintf(fnm, sizeof fnm, \"logs/solver_%ld_ea.bin\", (long)n);",
+"                  if (vm_base && (f = fopen(fnm, \"wb\"))) {",
+"                      uint32_t dn = g_spu_dma_ring_n, k0 = dn > 512 ? dn - 512 : 0;",
+"                      for (uint32_t k = k0; k < dn; k++) { spu_dma_trace_ent* te = &g_spu_dma_ring[k & 511u];",
+"                          uint32_t sz = te->size > 0x4000u ? 0x4000u : te->size;",
+"                          if (te->ea >= 0x00010000u && te->ea < 0xC0000000u && sz) {",
+"                              fwrite(&te->ea, 4, 1, f); fwrite(&sz, 4, 1, f); fwrite(vm_base + te->ea, 1, sz, f); } }",
+"                      fclose(f);",
+"                  }",
+"              }",
+"              ctx->gpr[104] = spu_il(0); } }"
+]
+},
+{
+"at": 200,
+"ctx": "        ctx->gpr[7] = spu_and(ctx->gpr[2], ctx->gpr[80]);",
+"rm": [
+"        if (ctx->gpr[2]._u16[0] == 0) { ctx->pc = 0x120F8; g_spu_trampoline_fn = jobmod_2df26beffbab_e10978_spu_func_000120F8; return; }"
+],
+"add": [
+"        if (ctx->gpr[2]._u16[0] == 0) { SPU_HOP(ctx, 0x120F8, jobmod_2df26beffbab_e10978_spu_func_000120F8); }"
+]
+},
+{
+"at": 205,
+"ctx": "        /* nop */;",
+"rm": [
+"        { ctx->pc = 0x120D8; g_spu_trampoline_fn = jobmod_2df26beffbab_e10978_spu_func_000120D8; return; }"
+],
+"add": [
+"        { SPU_HOP(ctx, 0x120D8, jobmod_2df26beffbab_e10978_spu_func_000120D8); }"
+]
+}
+]
+},
+"post": {},
+"preamble": [
+{
+"at": 4,
+"ctx": "#include \"spu_helpers.h\"",
+"rm": [],
+"add": [
+"#include \"spu_dma.h\"   /* v78 solver-guard dump: spu_dma_trace_ent */",
+"#include <stdio.h>",
+"#include <stdlib.h>"
+]
+}
+]
+}

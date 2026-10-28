@@ -1,0 +1,289 @@
+{
+"funcs": {
+"func_000C7180": [
+{
+"at": 1,
+"ctx": "void func_000C7180(ppu_context* ctx) {",
+"rm": [],
+"add": [
+"        rfom_text_patch((uint32_t)ctx->gpr[3]);   /* v152: button glyphs -> key names (stubs.cpp) */"
+]
+}
+],
+"func_000E14F8": [
+{
+"at": 7,
+"ctx": "        ctx->gpr[3] = vm_read32(ctx->gpr[9] + 0x0);",
+"rm": [],
+"add": [
+"        /* Resistance port (v144): the front end's copy of the speaker-count",
+"         * getter (game.elf func_000D316C) -- same race, same fix: a read",
+"         * before the audio-out setup gets the configured layout, not 2. */",
+"        rfom_snd_note(3, (uint32_t)ctx->gpr[3], (uint32_t)ctx->lr, 1);",
+"        ctx->gpr[3] = rfom_speakers((uint32_t)ctx->gpr[3]);"
+]
+}
+],
+"func_000E1B3C": [
+{
+"at": 1,
+"ctx": "void func_000E1B3C(ppu_context* ctx) {",
+"rm": [],
+"add": [
+"        rfom_snd_note(6, 0, (uint32_t)ctx->lr, 1);   /* v144 diag (front end) */"
+]
+}
+],
+"func_00513A7C": [
+{
+"at": 6,
+"ctx": "        vm_write16(ctx->gpr[9] + 0x0, ctx->gpr[3]);",
+"rm": [],
+"add": [
+"        rfom_snd_note(1, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[0], (uint32_t)ctx->gpr[9]);   /* v144 diag (front end) */"
+]
+}
+],
+"func_0051C368": [
+{
+"at": 2,
+"ctx": "        ctx->gpr[9] = vm_read32(ctx->gpr[2] + -0x6C50);",
+"rm": [],
+"add": [
+"        rfom_snd_note(2, (uint32_t)ctx->gpr[3], (uint32_t)ctx->lr, (uint32_t)ctx->gpr[9]);   /* v144 diag (front end) */"
+]
+}
+],
+"func_0053DDEC": [
+{
+"at": 14,
+"ctx": "        vm_write64(ctx->gpr[1] + 0x2F0, ctx->gpr[5]);",
+"rm": [
+"        ctx->lr = 0x0053DE24; func_0070FC3C(ctx); DRAIN_TRAMPOLINE(ctx);"
+],
+"add": [
+"        /* v145: guest setjmp (Lua's protected call) -- a host setjmp in THIS",
+"         * frame, so the guest longjmp can really come back here. */",
+"        if (setjmp(*rfom_jb_arm(ctx)) == 0) {",
+"            ctx->lr = 0x0053DE24; func_0070FC3C(ctx); DRAIN_TRAMPOLINE(ctx);",
+"        } else rfom_jb_landed(ctx);"
+]
+}
+],
+"func_005D2978": [
+{
+"at": 1,
+"ctx": "void func_005D2978(ppu_context* ctx) {",
+"rm": [],
+"add": [
+"        unsigned long long _rfom_wait_t0 = 0;   /* Resistance port: see loc_005D2AF4 */"
+]
+},
+{
+"at": 117,
+"ctx": "        ctx->gpr[5] = ctx->gpr[5] + ctx->gpr[0];",
+"rm": [],
+"add": [
+"        /* Resistance port: FIOS scheduler shutdown waits here for the scheduler",
+"         * thread's \"running\" word to clear. When the thread had to be forced",
+"         * out (leaked ops, func_005D6924) that word is never cleared, and the",
+"         * menu -> level hand-off hung on a black screen. Give up after 2 s;",
+"         * the thread has already exited by then. */",
+"        if (!_rfom_wait_t0) _rfom_wait_t0 = ppu_timebase_now();",
+"        if (ppu_timebase_now() - _rfom_wait_t0 > 2ull * 79800000ull) {   /* 2 s */",
+"            fprintf(stderr, \"[rfom] FIOS shutdown: scheduler never reported done -- continuing%c\", 10);",
+"            goto loc_005D2A18;",
+"        }"
+]
+},
+{
+"at": 136,
+"ctx": "        ctx->gpr[5] = ctx->gpr[5] + ctx->gpr[0];",
+"rm": [],
+"add": [
+"        /* Resistance port: FIOS scheduler shutdown waits here for the scheduler",
+"         * thread's \"running\" word to clear. When the thread had to be forced",
+"         * out (leaked ops, func_005D6924) that word is never cleared, and the",
+"         * menu -> level hand-off hung on a black screen. Give up after 2 s;",
+"         * the thread has already exited by then. */",
+"        if (!_rfom_wait_t0) _rfom_wait_t0 = ppu_timebase_now();",
+"        if (ppu_timebase_now() - _rfom_wait_t0 > 2ull * 79800000ull) {   /* 2 s */",
+"            fprintf(stderr, \"[rfom] FIOS shutdown: scheduler never reported done -- continuing%c\", 10);",
+"            goto loc_005D2A18;",
+"        }"
+]
+}
+],
+"func_005D6924": [
+{
+"at": 1,
+"ctx": "void func_005D6924(ppu_context* ctx) {",
+"rm": [],
+"add": [
+"        int _rfom_leak_n = 0;   /* Resistance port: see loc_005D7100 */"
+]
+},
+{
+"at": 549,
+"ctx": "loc_005D7100:",
+"rm": [],
+"add": [
+"        /* Resistance port: FIOS scheduler shutdown with \"ops complete but not",
+"         * yet deleted\". The front end leaks 25 boot-time ops (splash, frontend",
+"         * sound/fxconduit, loc text); this loop then prints the leak report and",
+"         * waits forever, and the menu -> level transition (exitspawn) hangs on a",
+"         * black screen. After the first report, shut down anyway. */",
+"        if (++_rfom_leak_n > 1) {",
+"            fprintf(stderr, \"[rfom] FIOS scheduler: shutting down with leaked ops (forced)%c\", 10);",
+"            goto rfom_fios_exit;",
+"        }"
+]
+},
+{
+"at": 938,
+"ctx": "        if (((ctx->cr >> 21) & 1)) goto loc_005D7100;",
+"rm": [],
+"add": [
+"rfom_fios_exit:"
+]
+}
+],
+"func_0070FD60": [
+{
+"at": 1,
+"ctx": "void func_0070FD60(ppu_context* ctx) {",
+"rm": [],
+"add": [
+"        const uint32_t _jb_ea = ((uint32_t)ctx->gpr[3] + 15u) & ~15u;   /* v145 */"
+]
+},
+{
+"at": 75,
+"ctx": "        { uint64_t ca = (ctx->xer >> 29) & 1; uint64_t result = ctx->gpr[4] + ca; ctx->xer = (ctx->xer & ~(1u << 29)) | ((result < ctx->gpr[4]) ? (1u << 29) : 0); ctx->gpr[3] = result; }",
+"rm": [],
+"add": [
+"        rfom_jb_jump(ctx, _jb_ea);   /* v145: back to the setjmp frame (does not return if found) */"
+]
+}
+]
+},
+"preamble": [
+"extern \"C\" void rfom_text_patch(uint32_t file_obj);",
+"extern \"C\" void rfom_snd_note(int kind, uint32_t v, uint32_t lr, uint32_t extra);",
+"extern \"C\" uint32_t rfom_speakers(uint32_t configured);",
+"#include <setjmp.h>",
+"extern \"C\" jmp_buf* rfom_jb_arm(ppu_context* ctx);",
+"extern \"C\" void rfom_jb_landed(ppu_context* ctx);",
+"extern \"C\" void rfom_jb_jump(ppu_context* ctx, uint32_t buf_ea);"
+],
+"header": [
+{
+"at": 117,
+"ctx": "#endif",
+"rm": [
+"/* Resistance port: one subtract-and-compare plus the poll-word test, instead",
+" * of four globals and five compares per guest access (~25% of the lifted",
+" * code's instructions). The runtime folds vm_inline_ok, the 0x10000 null",
+" * guard, the 0xE0000000 / ppu_vm_size end (minus 8, so any width fits) into",
+" * vm_inl_span, and the gcm ref-poll word into vm_inl_poll (ppu_loader.cpp,",
+" * vm_inline_refresh). vm_inl_span = 0 sends everything to the out-of-line",
+" * accessors. */",
+"#ifdef __cplusplus",
+"extern \"C\" {",
+"#endif",
+"extern uint32_t vm_inl_span, vm_inl_poll;",
+"#ifdef __cplusplus",
+"}",
+"#endif"
+],
+"add": []
+},
+{
+"at": 133,
+"ctx": "{",
+"rm": [
+"    (void)n;",
+"    return __builtin_expect((uint32_t)(ea - 0x10000u) < vm_inl_span, 1) &&",
+"           __builtin_expect(ea != vm_inl_poll, 1);"
+],
+"add": [
+"    return __builtin_expect(vm_inline_ok, 1) && ea >= 0x10000u && ea < 0xE0000000u &&",
+"           ea != ppu_hle_inject_base + 0x2008u &&",
+"           (ppu_vm_size == 0 || (uint64_t)ea + n <= ppu_vm_size);"
+]
+},
+{
+"at": 178,
+"ctx": "#define vm_read64(a) vm_read64_inl(a)",
+"rm": [
+"#endif",
+"",
+"/* Resistance port: inline guest-STORE fast paths, the twin of the loads above.",
+" * Every lifted store was an out-of-line call through watch / null-page / PT /",
+" * coherence probes -- ~25% of Fall of Man's main thread. The runtime sets",
+" * vm_inline_st_ok when no store diagnostic is armed; a store to a line an SPU",
+" * has reserved (g_spu_coh_bitmap_p) still takes the out-of-line path, which",
+" * serialises it against PUTLLC and raises the SPU's lost-reservation event.",
+" * Define PPU_NO_INLINE_STORES to use the calls. */",
+"#ifdef __cplusplus",
+"extern \"C\" {",
+"#endif",
+"extern int vm_inline_st_ok;",
+"extern unsigned char* g_spu_coh_bitmap_p;",
+"extern volatile int g_spu_coh_armed;",
+"#ifdef __cplusplus",
+"}",
+"#endif",
+"static inline int vm_st_fast(uint32_t ea, uint32_t n)",
+"{",
+"    if (!__builtin_expect(vm_inline_st_ok, 1) || !vm_inl_ok(ea, n)) return 0;",
+"    if (g_spu_coh_armed) {",
+"        const uint32_t l0 = ea >> 7, l1 = (ea + n - 1) >> 7;",
+"        if ((g_spu_coh_bitmap_p[l0 >> 3] >> (l0 & 7)) & 1u) return 0;",
+"        if (l1 != l0 && ((g_spu_coh_bitmap_p[l1 >> 3] >> (l1 & 7)) & 1u)) return 0;",
+"    }",
+"    return 1;",
+"}",
+"static inline void vm_write8_inl(uint64_t a, uint8_t v)",
+"{",
+"    const uint32_t ea = (uint32_t)a;",
+"    if (vm_st_fast(ea, 1)) { __atomic_store_n(vm_base + ea, v, __ATOMIC_RELAXED); return; }",
+"    vm_write8(a, v);",
+"}",
+"static inline void vm_write16_inl(uint64_t a, uint16_t v)",
+"{",
+"    const uint32_t ea = (uint32_t)a;",
+"    if (vm_st_fast(ea, 2)) { const uint16_t s = __builtin_bswap16(v);",
+"        if (!(ea & 1u)) __atomic_store_n((uint16_t*)(vm_base + ea), s, __ATOMIC_RELAXED);",
+"        else memcpy(vm_base + ea, &s, 2);",
+"        return; }",
+"    vm_write16(a, v);",
+"}",
+"static inline void vm_write32_inl(uint64_t a, uint32_t v)",
+"{",
+"    const uint32_t ea = (uint32_t)a;",
+"    if (vm_st_fast(ea, 4)) { const uint32_t s = __builtin_bswap32(v);",
+"        if (!(ea & 3u)) __atomic_store_n((uint32_t*)(vm_base + ea), s, __ATOMIC_RELAXED);",
+"        else memcpy(vm_base + ea, &s, 4);",
+"        return; }",
+"    vm_write32(a, v);",
+"}",
+"static inline void vm_write64_inl(uint64_t a, uint64_t v)",
+"{",
+"    const uint32_t ea = (uint32_t)a;",
+"    if (vm_st_fast(ea, 8)) { const uint64_t s = __builtin_bswap64(v);",
+"        if (!(ea & 7u)) __atomic_store_n((uint64_t*)(vm_base + ea), s, __ATOMIC_RELAXED);",
+"        else memcpy(vm_base + ea, &s, 8);",
+"        return; }",
+"    vm_write64(a, v);",
+"}",
+"#ifndef PPU_NO_INLINE_STORES",
+"#define vm_write8(a, v)  vm_write8_inl((a), (v))",
+"#define vm_write16(a, v) vm_write16_inl((a), (v))",
+"#define vm_write32(a, v) vm_write32_inl((a), (v))",
+"#define vm_write64(a, v) vm_write64_inl((a), (v))"
+],
+"add": []
+}
+]
+}
