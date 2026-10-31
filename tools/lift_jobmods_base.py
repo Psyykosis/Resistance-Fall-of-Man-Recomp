@@ -40,6 +40,10 @@ BASE   = int(os.environ.get("JOBMOD_BASE","0x4000"),0)
 # const tables run to the image end. Passed to spu_lifter.py --code-end so the
 # tail is left un-disassembled. Without it, these two physics jobmods each lift
 # ~97 `.word` unsupported (was 0 in the original, pre-git-clean lift).
+# v189: modules lifted without --merge-chunks (their hooks/spu/*.json edits are
+# keyed to the per-chunk functions).
+NO_MERGE = set()   # v189: 2df26 merged too (its hooks apply to the merged lift; diff-tested)
+
 CODE_END = {
     "jobmod_ef33c6c99dc7_e0A40": 0xAE68,   # real code ends at br 0xA554 @ 0xAE60
     "jobmod_6943e26934ea_e0A20": 0xAE48,   # real code ends at br 0xA534 @ 0xAE40
@@ -139,6 +143,8 @@ def main():
                     help="Pass --merge-chunks to spu_lifter.py: each run of chunks "
                          "between call targets becomes one C function with gotos "
                          "instead of chunks linked by trampolines.")
+    ap.add_argument("--no-merge", action="store_true",
+                    help="v189: lift every module chunk-per-function (the pre-v189 layout).")
     args = ap.parse_args()
     JOBMODS = args.jobmods
     OUTDIR  = args.out
@@ -180,7 +186,11 @@ def main():
                "--source-name", "spu_recomp.c", "--header-name", "spu_recomp.h"]
         if name in CODE_END:
             cmd += ["--code-end", hex(CODE_END[name])]
-        if args.merge_chunks:
+        # v189: merged chunks (one C function per run of blocks, gotos inside) are
+        # the default -- the hot job loops (geometry cull 6dc227 42C8/4218) no
+        # longer hop between functions and reload every register each iteration.
+        # Modules with hand edits keyed to the per-chunk layout stay unmerged.
+        if (args.merge_chunks or not args.no_merge) and name not in NO_MERGE:
             cmd += ["--merge-chunks"]
         # Only offer addresses that fall inside THIS module's image.
         inside = [a for a in EXTRA_FUNCS if BASE <= int(a, 0) < BASE + len(raw)]

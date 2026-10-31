@@ -335,6 +335,7 @@ static int s_menu_mouse = 1; static long s_menu_step = 150;   /* v160 */
 volatile unsigned long long g_kbm_mouse_abs = 0;     /* total mouse travel, counts */
 volatile unsigned long long g_rfom_play_ms = 0;   /* v162: last tick the in-play look code ran (stubs.cpp) */
 volatile int g_rfom_pause_ui = 0;   /* v162c: the pause menu loaded its text (stubs.cpp); cleared when play resumes */
+volatile double g_rfom_view_fov = 82.0;   /* v190e: the player's view FOV (stubs.cpp rfom_fov_note) */
 volatile int g_rfom_space_start = 0;   /* v160v: set by stubs.cpp while a level intro card waits for Start */
 volatile int g_rfom_use_kbm = 0;              /* an INTERACT key is held */
 volatile int g_rfom_kbm_interact_bound = 0;   /* controls.txt binds INTERACT */
@@ -448,9 +449,22 @@ static u32 kbm_unswap(u32 hsb)
 {
     extern uint8_t* vm_base;
     const u32 o = g_rfom_opts_ea;
+    { static int said = 0;   /* v190e: say once when the layout table was never found */
+      if (!o && hsb && !said) { said = 1; printf("[controls] game button layout: options block not found yet (no swap applied)\n"); } }
     if (!o || !vm_base || !hsb) return hsb;
     u16 cur[16];
     for (int i = 0; i < 16; i++) { const uint8_t* p = vm_base + o + 4 * i; cur[i] = (u16)((p[2] << 8) | p[3]); }
+    /* v190c: log the game's button layout whenever it changes (which slots
+     * the controller screen moved away from the shipped layout). */
+    { static u16 last[16]; static int have = 0;
+      if (!have || memcmp(last, cur, sizeof cur)) {
+          have = 1; memcpy(last, cur, sizeof cur);
+          char b[512]; int n = snprintf(b, sizeof b, "[controls] game button layout:");
+          int moved = 0;
+          for (int i = 0; i < 16; i++) if (cur[i] != s_def_layout[i]) { moved++; n += snprintf(b + n, sizeof b - n, " slot%d 0x%04X->0x%04X", i, s_def_layout[i], cur[i]); }
+          if (!moved) snprintf(b + n, sizeof b - n, " as shipped");
+          printf("%s\n", b);
+      } }
     /* game word: digital1 in the high byte, digital2 in the low byte with its
      * nibbles swapped (L2/R2/L1/R1 = 0x10/0x20/0x40/0x80, Tri/Circle/Cross/Square
      * = 0x01..0x08) -- a crouch (L2) <-> d-pad up swap moved 0x10 <-> 0x1000. */
@@ -511,10 +525,33 @@ static void pad_poll_keyboard(void)
 
     /* Wheel: each notch is a short press. */
     static int wheel_up_frames = 0, wheel_dn_frames = 0;
+    static ULONGLONG s_scope_up_until = 0, s_scope_dn_until = 0;   /* v190f */
     { long w = InterlockedExchange(&g_kbm_wheel, 0);
-      if (w > 0) wheel_up_frames = 4; else if (w < 0) wheel_dn_frames = 4; }
+      if (w > 0) wheel_up_frames = 4; else if (w < 0) wheel_dn_frames = 4;
+      /* v190f: in a sniper scope the game's zoom starts slow and speeds up the
+       * longer its button is HELD, so separate wheel taps only inched it. In
+       * the scope each notch holds the zoom button for RFOM_SCOPE_HOLD_MS
+       * (default 130) more, up to 400 ms ahead: steady scrolling = one long
+       * hold that accelerates like a held d-pad. 0 = taps as before. */
+      static int hold = -1;
+      if (hold < 0) { const char* e = getenv("RFOM_SCOPE_HOLD_MS"); hold = e ? atoi(e) : 130; }
+      if (w && hold > 0 && g_rfom_view_fov > 1.0 && g_rfom_view_fov < 45.0) {
+          const ULONGLONG tn = GetTickCount64();
+          ULONGLONG* u = w > 0 ? &s_scope_up_until : &s_scope_dn_until;
+          if (w > 0) s_scope_dn_until = 0; else s_scope_up_until = 0;   /* reversing stops the other way */
+          ULONGLONG b = *u > tn ? *u : tn;
+          { long nn = (w > 0 ? w : -w) / 120; if (nn < 1) nn = 1;   /* raw wheel delta: 120 a notch */
+            b += (ULONGLONG)hold * (ULONGLONG)nn; }
+          if (b > tn + 400) b = tn + 400;
+          *u = b;
+      } }
+    { const ULONGLONG tn = GetTickCount64();
+      if (!(g_rfom_view_fov > 1.0 && g_rfom_view_fov < 45.0)) s_scope_up_until = s_scope_dn_until = 0;   /* left the scope */
+      if (tn < s_scope_up_until && wheel_up_frames < 1) wheel_up_frames = 1;
+      if (tn < s_scope_dn_until && wheel_dn_frames < 1) wheel_dn_frames = 1; }
 
     u16 btns = 0; int lx = 0, ly = 0, krx = 0, kry = 0, interact = 0;
+    u16 wup_btn = 0;   /* v190e: buttons the wheel-up notch pressed this poll */
     for (int i = 0; i < s_kbm_n; i++) {
         int vk = s_kbm[i].vk, down;
         if (vk == KBM_WHEEL_UP) down = wheel_up_frames > 0;
@@ -523,7 +560,7 @@ static void pad_poll_keyboard(void)
         else down = (GetAsyncKeyState(vk) & 0x8000) != 0;
         if (!down) continue;
         switch (s_kbm[i].act) {
-        case KA_BTN: btns |= s_kbm[i].btn; break;
+        case KA_BTN: btns |= s_kbm[i].btn; if (vk == KBM_WHEEL_UP) wup_btn |= s_kbm[i].btn; break;
         case KA_LS_UP: ly -= 1; break;    case KA_LS_DOWN: ly += 1; break;
         case KA_LS_LEFT: lx -= 1; break;  case KA_LS_RIGHT: lx += 1; break;
         case KA_RS_UP: kry -= 1; break;   case KA_RS_DOWN: kry += 1; break;
@@ -533,6 +570,25 @@ static void pad_poll_keyboard(void)
     }
     if (wheel_up_frames > 0) wheel_up_frames--;
     if (wheel_dn_frames > 0) wheel_dn_frames--;
+    /* v190e: sniper scope (the game's view FOV under 45 degrees: the Fareye is
+     * ~27, ADS zooms ~65). In the scope the game zooms in with L2 -- the crouch
+     * button -- so Shift zoomed in and also stood the player up, while the wheel
+     * only zoomed out (d-pad down). Scoped: the crouch keys don't press L2, and a
+     * wheel-up notch presses L2 (zoom in) in place of its normal button.
+     * RFOM_SCOPE_WHEEL=0 = old behaviour. */
+    { static int en = -1;
+      if (en < 0) { const char* e = getenv("RFOM_SCOPE_WHEEL"); en = e ? atoi(e) : 0; }   /* v190g: off -- the user's save had crouch <-> d-pad up swapped; with the shipped layout the scope zooms on d-pad up/down and this made wheel-up crouch */
+      static int fe = -1;
+      if (fe < 0) { char mp[MAX_PATH] = ""; GetModuleFileNameA(NULL, mp, MAX_PATH);
+                    const char* b = strrchr(mp, '\\'); b = b ? b + 1 : mp;
+                    fe = _stricmp(b, "ResistanceFoM.exe") ? 0 : 1; }
+      if (en && !fe) {
+          const double fov = g_rfom_view_fov;
+          if (fov > 1.0 && fov < 45.0) {
+              btns &= (u16)~CELL_PAD_CTRL_L2;
+              if (wup_btn) btns = (u16)((btns & ~wup_btn) | CELL_PAD_CTRL_L2);
+          }
+      } }
 
     /* Mouse -> right stick: counts/second, smoothed, scaled so that
      * ~2500 counts/s (a brisk flick at 800 dpi) is full deflection. */
@@ -600,7 +656,13 @@ static void pad_poll_keyboard(void)
       if (fe2 < 0) { char mp[MAX_PATH] = ""; GetModuleFileNameA(NULL, mp, MAX_PATH);
                      const char* b = strrchr(mp, '\\'); b = b ? b + 1 : mp;
                      fe2 = _stricmp(b, "ResistanceFoM.exe") ? 1 : 0; }
-      const int menu = fe2 && g_rfom_play_ms && now - g_rfom_play_ms > 200;
+      /* v190c: holding the weapon wheel (R2) also stops the in-play look code,
+       * which made this think a menu was open: a held S then pressed d-pad down
+       * = "previous grenade" (user: E sometimes switched grenades). While R2 is
+       * held, and for 300 ms after, it is gameplay, not a menu. */
+      static ULONGLONG s_r2_ms = 0;
+      if (btns & CELL_PAD_CTRL_R2) s_r2_ms = now;
+      const int menu = fe2 && g_rfom_play_ms && now - g_rfom_play_ms > 200 && (!s_r2_ms || now - s_r2_ms > 300);
       { static int was = -1;
         if (menu != was) { was = menu; static int n = 0;
           if (n++ < 200) { FILE* f = fopen("logs\\menumode.txt", n == 1 ? "w" : "a");

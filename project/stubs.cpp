@@ -459,6 +459,7 @@ extern "C" int rfom_frame_wait(uint64_t target, uint32_t last_ea)
  * zoom-in animation stays smooth. 0 / unset = the original. */
 #include <cmath>
 static volatile double g_rfom_game_fov = 82.0;   /* last FOV the game set (degrees, before widening) */
+extern "C" volatile double g_rfom_view_fov;   /* v190e: cellPad.c scope mode reads the player's FOV */
 extern "C" double rfom_fov_adjust(double f)
 {
     static double k = -1.0;
@@ -497,7 +498,7 @@ extern "C" void rfom_fov_note(uint32_t cam, double f)
       if (k == ns && ns < 32) { seen[ns++] = cam;
           FILE* fl = fopen("logs\\cameras.txt", ns == 1 ? "w" : "a");
           if (fl) { fprintf(fl, "camera 0x%08X first fov %.2f\n", cam, f); fclose(fl); } } }
-    if (any || cam == s_rfom_view_cam || !s_rfom_view_cam) g_rfom_game_fov = f;
+    if (any || cam == s_rfom_view_cam || !s_rfom_view_cam) { g_rfom_game_fov = f; g_rfom_view_fov = f; }
 }
 /* The camera's +0x10 / +0x14 (horizontal / vertical FOV, radians) drive the
  * game's level-of-detail choice, not the projection: widened, distant models

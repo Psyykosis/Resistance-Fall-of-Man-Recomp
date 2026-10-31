@@ -621,7 +621,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
               extern u32 gcm_io_offset_to_ea(u32 io);
               extern unsigned long long ps3_ms_now(void);
               u32 ea = gcm_io_offset_to_ea(0x0F100000u + ((s_notify_ctx & 7u) ^ 7u) * 0x40u);
-              { static int n = 0; if (n++ < 4)   /* TEMP */
+              { static int n = 0; if (n < 4 && ++n)   /* TEMP */
                   fprintf(stderr, "[RSX] NOTIFY slot %u -> ea 0x%08X\n", (s_notify_ctx & 7u) ^ 7u, ea); }
               if (ea) {
                   unsigned long long ts = ps3_ms_now() * 1000000ull;
@@ -633,7 +633,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
       } }
     { static u32 s_sem_off = 0, s_sem_ctx = 0;
       if (method == 0x01A4) {
-          if (data != s_sem_ctx) { static int _l = 0; if (_l++ < 8)
+          if (data != s_sem_ctx) { static int _l = 0; if (_l < 8 && ++_l)
               fprintf(stderr, "[RSX] semaphore context dma = 0x%08X\n", data); }
           s_sem_ctx = data;
       }

@@ -686,6 +686,64 @@ volatile unsigned g_spu_putllc_sync_hit = 0;
 #define SPU_JOB_RETURN_LS   0x3FF00u
 
 /* Returns 1 if `cmd` is an atomic line op and was handled here, else 0. */
+/* v190e diag: PUTLLC failures by line and caller, every 5 s. A Nottingham
+ * profile had SPURS lane 0 spending 13% of its time in job 83d2's back-off
+ * delay (func_70E8, 2500 spins) after failed PUTLLCs on one shared line, with
+ * the main thread waiting on that job. Which line, and who keeps writing it?
+ * "[putllc-fail] 5 s: ..." lists the top lines (image, link register, count,
+ * no-reservation vs changed-line) and the host thread ids that took
+ * reservations away on the worst one (match them to the F11 "prof tid" lines).
+ * SPU_PUTLLC_DIAG=0 off. */
+static void spu_putllc_fail_note(spu_context* ctx, uint32_t ea)
+{
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("SPU_PUTLLC_DIAG"); en = e ? atoi(e) : 1; }
+    if (!en) return;
+    typedef struct { uint32_t ea, lr; int img; volatile long n, noresv; } PF;
+    static PF t[32]; static volatile long s_lock; static ULONGLONG s_t0;
+    extern volatile uint32_t g_coh_hot_line;
+    extern volatile long g_coh_kill_n[8]; extern volatile unsigned long g_coh_kill_tid[8];
+    while (InterlockedExchange(&s_lock, 1)) YieldProcessor();
+    const uint32_t lr = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
+    const int nor = !ctx->resv_valid;
+    int k = -1, fr = -1;
+    for (int i = 0; i < 32; i++) {
+        if (t[i].n && t[i].ea == ea && t[i].img == ctx->image_id && t[i].lr == lr) { k = i; break; }
+        if (!t[i].n && fr < 0) fr = i;
+    }
+    if (k < 0 && fr >= 0) { k = fr; t[k].ea = ea; t[k].img = ctx->image_id; t[k].lr = lr; t[k].noresv = 0; }
+    if (k >= 0) { t[k].n++; if (nor) t[k].noresv++; }
+    const ULONGLONG now = GetTickCount64();
+    if (!s_t0) s_t0 = now;
+    if (now - s_t0 >= 5000) {
+        s_t0 = now;
+        char b[2048]; int p = snprintf(b, sizeof b, "[putllc-fail] 5 s:");
+        int best = -1;
+        for (int r = 0; r < 5; r++) {
+            int m = -1;
+            for (int i = 0; i < 32; i++) if (t[i].n > 0 && (m < 0 || t[i].n > t[m].n)) m = i;
+            if (m < 0) break;
+            if (r == 0) best = m;
+            p += snprintf(b + p, sizeof b - p, " | ea=0x%08X img=%d lr=0x%05X n=%ld (noresv %ld)",
+                          t[m].ea, t[m].img, t[m].lr, t[m].n, t[m].noresv);
+            t[m].n = -t[m].n;   /* mark printed */
+        }
+        p += snprintf(b + p, sizeof b - p, " | killers of 0x%08X:", g_coh_hot_line);
+        for (int i = 0; i < 8; i++) if (g_coh_kill_tid[i])
+            p += snprintf(b + p, sizeof b - p, " tid %lu x%ld", g_coh_kill_tid[i], g_coh_kill_n[i]);
+        { extern volatile unsigned long long g_coh_kill_st[8][4]; extern volatile long g_coh_kill_stn[8];
+          for (int i = 0; i < 8 && p < (int)sizeof b - 120; i++) if (g_coh_kill_stn[i]) {
+              p += snprintf(b + p, sizeof b - p, " | st x%ld rva=0x%llX,0x%llX,0x%llX,0x%llX", g_coh_kill_stn[i],
+                            g_coh_kill_st[i][0], g_coh_kill_st[i][1], g_coh_kill_st[i][2], g_coh_kill_st[i][3]);
+              g_coh_kill_stn[i] = 0; } }
+        fprintf(stderr, "%s%c", b, 10);
+        g_coh_hot_line = best >= 0 ? (t[best].ea & ~127u) : 0xFFFFFFFFu;
+        for (int i = 0; i < 8; i++) { g_coh_kill_tid[i] = 0; g_coh_kill_n[i] = 0; }
+        memset(t, 0, sizeof t);
+    }
+    InterlockedExchange(&s_lock, 0);
+}
+
 static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
 {
     /* Classify FIRST. Every MFC_Cmd write lands here, and only the switch at
@@ -1007,6 +1065,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
             ctx->atomic_stat = 0;                      /* PUTLLC_SUCCESS */
         } else {
             ctx->atomic_stat = 1;                      /* PUTLLC_FAILURE -> retry */
+            spu_putllc_fail_note(ctx, ea);
             /* SPU_PUTLLC_WHY=1: which of the three conditions failed.
              * A PUTLLC retry loop that never succeeds is a livelock, and
              * "failed" alone cannot distinguish a lost reservation from a line
@@ -1326,6 +1385,37 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
 
     ctx->status = SPU_STATUS_WAITING_CHANNEL;
     yz_lockstep_block_begin(ctx);          /* release the run token before the OS wait */
+    /* Resistance port (v190): spin a little before sleeping. The main thread
+     * talks to the two raw SPUs (sound engine, draw-sort) in tiny round trips:
+     * it pushes a command or flips a flag, then spins until the SPU answers
+     * (func_000513C0 / func_00050E2C / func_00051184, ~12% of the main thread
+     * in dense fights). A sleeping SPU thread takes 20-50 us to be scheduled
+     * again after the wake, and an F11 frame trace showed raw SPU 1 waiting
+     * ~80 times a frame, 70% of them shorter than 50 us -- that was mostly
+     * wake-up latency the main thread sat through. So poll the predicate for
+     * up to SPU_WAIT_SPIN_US (default 100) first. Raw SPUs only by default;
+     * SPU_WAIT_SPIN_ALL=1 spins every SPU context, SPU_WAIT_SPIN_US=0 = old. */
+    {
+        static int s_spin_us = -1, s_spin_all = -1;
+        static LARGE_INTEGER s_qf;
+        if (s_spin_us < 0) {
+            const char* e = getenv("SPU_WAIT_SPIN_US"); int v = e ? atoi(e) : 100;
+            const char* a = getenv("SPU_WAIT_SPIN_ALL"); s_spin_all = a ? atoi(a) : 0;
+            QueryPerformanceFrequency(&s_qf);
+            s_spin_us = v < 0 ? 0 : v;
+        }
+        if (s_spin_us > 0 && (s_spin_all || ctx->spu_id < 8u)) {
+            LARGE_INTEGER q0, q; QueryPerformanceCounter(&q0);
+            const LONGLONG lim = s_qf.QuadPart * s_spin_us / 1000000;
+            for (;;) {
+                MemoryBarrier();
+                if (spu_ch_ready(ctx, channel)) break;
+                for (int k = 0; k < 24; k++) YieldProcessor();
+                QueryPerformanceCounter(&q);
+                if (q.QuadPart - q0.QuadPart >= lim) break;
+            }
+        }
+    }
     {
         unsigned long long start = GetTickCount64(), next_hb = 2000;
         while (!spu_ch_ready(ctx, channel)) {

@@ -38,9 +38,15 @@ struct ffxCreateBackendDX12Desc { ffxCreateContextDescHeader header; ID3D12Devic
                        * pixels all "coming from" one spot, the gun moving 1400 px)
                        * = the FSR flicker. Plus a lead cap, see FSR_LEAD. */
 #define FSR_LEAD 4u   /* record may be at most this many frames ahead of the last FSR dispatch */
-#define FSR_HIST_SLOTS  3072u
+/* v189: 3072 -> up to 8192. Fields of grass are 5000+ scene draws; every draw past
+ * the limit got no motion, so whole patches of grass and trees smeared whenever
+ * enough of them were on screen ("only at some angles"). The buffer is
+ * FSR_RING x slots x 8.4 KB (550 MB of upload memory at 8192); if that can't be
+ * had it steps down. RSX_FSR_SLOTS caps it. */
+#define FSR_HIST_SLOTS  8192u
+static u32 s_fsr_slots = FSR_HIST_SLOTS;   /* what was actually allocated */
 #define FSR_HIST_STRIDE 8448u            /* vp_c[512] + posscale/posoffset/branch = 8240 B, 256-aligned */
-#define FSR_MAP_N       8192u            /* power of two */
+#define FSR_MAP_N       32768u           /* power of two (v189: 8192 -> 32768 with the slots) */
 
 int fsr_mode(void)
 {
@@ -77,12 +83,18 @@ static int fsr_hist_init(void)
     D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RESOURCE_DESC rd = {0};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width = (u64)FSR_RING * FSR_HIST_SLOTS * FSR_HIST_STRIDE;
+    { const char* e = getenv("RSX_FSR_SLOTS"); if (e && atoi(e) >= 256 && (u32)atoi(e) < s_fsr_slots) s_fsr_slots = (u32)atoi(e); }
     rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &rd,
-            D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void**)&s_fsr_hist))) {
-        s_fsr_hist_fail = 1; fprintf(stderr, "[FSR] history buffer allocation failed%c", 10); return 0; }
+    for (;;) {
+        rd.Width = (u64)FSR_RING * s_fsr_slots * FSR_HIST_STRIDE;
+        if (SUCCEEDED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource, (void**)&s_fsr_hist))) break;
+        s_fsr_hist = NULL;
+        if (s_fsr_slots <= 2048u) { s_fsr_hist_fail = 1; fprintf(stderr, "[FSR] history buffer allocation failed%c", 10); return 0; }
+        s_fsr_slots = s_fsr_slots > 4096u ? 4096u : 2048u;
+    }
+    fprintf(stderr, "[FSR] motion history: %u draws a frame%c", s_fsr_slots, 10);
     D3D12_RANGE nr = {0, 0}; void* m = NULL;
     s_fsr_hist->lpVtbl->Map(s_fsr_hist, 0, &nr, &m);
     if (!m) { s_fsr_hist_fail = 1; return 0; }
@@ -90,9 +102,19 @@ static int fsr_hist_init(void)
     return 1;
 }
 
-typedef struct { u64 key; u32 val; u32 gen; } FsrMapE;
+typedef struct { u64 key; u32 val; u32 gen; u32 n; } FsrMapE;   /* n: v189 draws of this key so far (ordinal) */
 static FsrMapE s_fsr_map[2][FSR_MAP_N];  static u32 s_fsr_map_gen[2], s_fsr_map_frame[2];
 static FsrMapE s_fsr_occ[FSR_MAP_N];     static u32 s_fsr_occ_gen;
+/* v189: exact-match lookups by (key, hfull) and (key, hvar), same generations as
+ * s_fsr_map. The match used to walk the key's whole instance chain (up to 1024)
+ * per draw: a grass field is thousands of draws of one key, so that walk was
+ * quadratic -- 18% of the FIFO thread in Nottingham. */
+static FsrMapE s_fsr_exf[2][FSR_MAP_N], s_fsr_exv[2][FSR_MAP_N];
+/* v189: (key, ordinal) -> slot: the n-th draw of a key last frame. Swaying grass
+ * never matches exactly, and searching 64 instances' signatures per clump was
+ * the FIFO thread's top cost; the same-ordinal instance is tried first and kept
+ * when it is close (draw order is stable while the view is). */
+static FsrMapE s_fsr_ord[2][FSR_MAP_N];
 static int s_fsr_map_cur; static u32 s_fsr_tab_frame, s_fsr_hist_n;
 #define FSR_SIG_ROWS 16u   /* v184j: 32 -> 16 (v184e raised it; exact hashes now do the heavy lifting) */
 static float s_fsr_sig[FSR_RING][FSR_HIST_SLOTS][FSR_SIG_ROWS * 4];   /* v177: per slot constant signature */
@@ -104,10 +126,17 @@ static FsrMapE* fsr_find(FsrMapE* t, u32 gen, u64 key, int insert)
 {
     u32 i = (u32)(key ^ (key >> 29)) & (FSR_MAP_N - 1u);
     for (u32 n = 0; n < FSR_MAP_N; n++, i = (i + 1u) & (FSR_MAP_N - 1u)) {
-        if (t[i].gen != gen) { if (!insert) return NULL; t[i].gen = gen; t[i].key = key; t[i].val = 0; return &t[i]; }
+        if (t[i].gen != gen) { if (!insert) return NULL; t[i].gen = gen; t[i].key = key; t[i].val = 0; t[i].n = 0; return &t[i]; }
         if (t[i].key == key) return &t[i];
     }
     return NULL;
+}
+/* v190b: start the cache miss early. The tables are 768 KB each (eight of
+ * them), so every lookup missed the cache; fsr_find was ~6% of the FIFO thread
+ * in a Titan fight. The keys are known well before the lookups. */
+static void fsr_pf(const FsrMapE* t, u64 key)
+{
+    _mm_prefetch((const char*)&t[(u32)(key ^ (key >> 29)) & (FSR_MAP_N - 1u)], _MM_HINT_T0);
 }
 
 /* Called from vp_record_cb with the draw's finished constant slot. */
@@ -139,7 +168,7 @@ static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* c
         s_fsr_map_cur ^= 1; s_fsr_map_gen[s_fsr_map_cur]++; s_fsr_map_frame[s_fsr_map_cur] = fr;
         s_fsr_occ_gen++;
     }
-    if (s_fsr_hist_n >= FSR_HIST_SLOTS) {
+    if (s_fsr_hist_n >= s_fsr_slots) {
         /* v184: out of history slots (York: 4700 scene draws > 3072). Still
          * jitter it -- an un-jittered draw among jittered ones z-fights its
          * own light passes and shakes against the rest. No motion for it. */
@@ -157,10 +186,11 @@ static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* c
     h = fsr_mix(h, dr->ib_count ? dr->ib_count : dr->vertex_count);
     h = fsr_mix(h, dr->tex[0].raw);
     h = fsr_mix(h, ((u64)dr->gf << 32) | dr->tex[1].raw);
+    fsr_pf(s_fsr_map[s_fsr_map_cur], h); fsr_pf(s_fsr_map[s_fsr_map_cur ^ 1], h);
 
     const u32 slot = s_fsr_hist_n++;
     const u32 ring = fr % FSR_RING;
-    const u64 cur_off = ((u64)ring * FSR_HIST_SLOTS + slot) * FSR_HIST_STRIDE;
+    const u64 cur_off = ((u64)ring * s_fsr_slots + slot) * FSR_HIST_STRIDE;
     u8* hp = s_fsr_hist_mapped + cur_off;
     if (vs_idx >= 0 && vs_idx < s_d3d.vp_vs_n && !s_d3d.vp_vs[vs_idx].c_all) {
         const VPVSEntry* ve = &s_d3d.vp_vs[vs_idx];
@@ -214,6 +244,9 @@ static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* c
           if (vary && vary[r]) { hv = (hv ^ q[0]) * 0x100000001B3ull; hv = (hv ^ q[1]) * 0x100000001B3ull; hv ^= r; nv++; }
       }
       s_fsr_hfull[ring][slot] = hf; s_fsr_hvar[ring][slot] = nv ? hv : 0;
+      { const int pm2 = s_fsr_map_cur ^ 1;
+        fsr_pf(s_fsr_exf[pm2], fsr_mix(h, hf)); fsr_pf(s_fsr_exf[s_fsr_map_cur], fsr_mix(h, hf));
+        if (nv) { fsr_pf(s_fsr_exv[pm2], fsr_mix(h, hv) ^ 1u); fsr_pf(s_fsr_exv[s_fsr_map_cur], fsr_mix(h, hv) ^ 1u); } }
       for (u32 q = 0; q < FSR_SIG_ROWS; q++) {
           const u32 row = nr ? rows[(u32)(((u64)q * nr) / FSR_SIG_ROWS)] : 0u;
           memcpy(sig + q * 4, csrc + (size_t)row * 16, 16);
@@ -222,6 +255,8 @@ static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* c
     u64 prev_off = cur_off;                     /* no match: "did not move" */
     dr->fsr_mt = 0; dr->fsr_chain = 0; dr->fsr_bd = -1.0f; dr->fsr_slot = slot; dr->fsr_pslot = 0xFFFFFFFFu;
     const int pm = s_fsr_map_cur ^ 1;
+    FsrMapE* ce = fsr_find(s_fsr_map[s_fsr_map_cur], s_fsr_map_gen[s_fsr_map_cur], h, 1);
+    const u32 ord = ce ? ce->n++ : 0xFFFFFFFFu;
     if (s_fsr_map_frame[pm] == fr - 1u) {
         FsrMapE* e = fsr_find(s_fsr_map[pm], s_fsr_map_gen[pm], h, 0);
         if (e) {
@@ -229,13 +264,25 @@ static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* c
             u32 best = 0xFFFFFFFFu; float bd = 3.0e38f; int n = 0;
             { const u64 hf = s_fsr_hfull[ring][slot], hv = s_fsr_hvar[ring][slot];
               u32 bv = 0xFFFFFFFFu; int nn = 0;
-              for (u32 c = e->val ? e->val - 1u : 0xFFFFFFFFu; c != 0xFFFFFFFFu && nn < 1024; c = s_fsr_next[pr][c], nn++) {
-                  if (s_fsr_hfull[pr][c] == hf) { best = c; break; }
-                  if (hv && bv == 0xFFFFFFFFu && s_fsr_hvar[pr][c] == hv) bv = c;
-              }
+              { const FsrMapE* xf = fsr_find(s_fsr_exf[pm], s_fsr_map_gen[pm], fsr_mix(h, hf), 0);
+                if (xf && xf->val) best = xf->val - 1u;
+                else if (hv) { const FsrMapE* xv = fsr_find(s_fsr_exv[pm], s_fsr_map_gen[pm], fsr_mix(h, hv) ^ 1u, 0);
+                               if (xv && xv->val) bv = xv->val - 1u; } }
               dr->fsr_chain = (u16)nn; dr->fsr_mt = best != 0xFFFFFFFFu ? 1 : 0;
               if (best == 0xFFFFFFFFu) { best = bv; if (bv != 0xFFFFFFFFu) dr->fsr_mt = 2; }
               if (best != 0xFFFFFFFFu) { bd = 0.0f; n = 1 << 20; s_fsr_st_exact++; } }
+            if (best == 0xFFFFFFFFu && ord != 0xFFFFFFFFu) {   /* v189: same-ordinal instance first */
+                const FsrMapE* xo = fsr_find(s_fsr_ord[pm], s_fsr_map_gen[pm], fsr_mix(h, ord) ^ 2u, 0);
+                if (xo && xo->val) {
+                    const u32 c = xo->val - 1u; const float* ps = s_fsr_sig[pr][c];
+                    float dsum = 0.0f, mag = 0.0f;
+                    for (u32 k = 0; k < FSR_SIG_ROWS * 4; k++) {
+                        const float df = ps[k] - sig[k]; dsum += df < 0.0f ? -df : df;
+                        mag += sig[k] < 0.0f ? -sig[k] : sig[k];
+                    }
+                    if (dsum == dsum) { best = c; bd = dsum; if (dsum <= 0.02f * mag) n = 1 << 20; else n = 32; }
+                }
+            }
             for (u32 c = e->val ? e->val - 1u : 0xFFFFFFFFu; c != 0xFFFFFFFFu && n < 64; c = s_fsr_next[pr][c], n++) {   /* v184j: 256 -> 64 */
                 const float* ps = s_fsr_sig[pr][c]; float dsum = 0.0f;
                 for (u32 k = 0; k < FSR_SIG_ROWS * 4; k += 4) {
@@ -245,11 +292,17 @@ static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* c
                 if (!(dsum == dsum)) continue;
                 if (dsum < bd) { bd = dsum; best = c; if (dsum == 0.0f) break; }
             }
-            if (best != 0xFFFFFFFFu) { prev_off = ((u64)pr * FSR_HIST_SLOTS + best) * FSR_HIST_STRIDE; s_fsr_st_match++;
+            if (best != 0xFFFFFFFFu) { prev_off = ((u64)pr * s_fsr_slots + best) * FSR_HIST_STRIDE; s_fsr_st_match++;
                                        if (!dr->fsr_mt) dr->fsr_mt = 3; dr->fsr_bd = bd; dr->fsr_pslot = best; }
         }
     }
-    FsrMapE* ce = fsr_find(s_fsr_map[s_fsr_map_cur], s_fsr_map_gen[s_fsr_map_cur], h, 1);
+    { const u64 hf = s_fsr_hfull[ring][slot], hv = s_fsr_hvar[ring][slot];   /* v189 exact tables */
+      FsrMapE* xf = fsr_find(s_fsr_exf[s_fsr_map_cur], s_fsr_map_gen[s_fsr_map_cur], fsr_mix(h, hf), 1);
+      if (xf) xf->val = slot + 1u;
+      if (hv) { FsrMapE* xv = fsr_find(s_fsr_exv[s_fsr_map_cur], s_fsr_map_gen[s_fsr_map_cur], fsr_mix(h, hv) ^ 1u, 1);
+                if (xv) xv->val = slot + 1u; } }
+    if (ord != 0xFFFFFFFFu) { FsrMapE* xo = fsr_find(s_fsr_ord[s_fsr_map_cur], s_fsr_map_gen[s_fsr_map_cur], fsr_mix(h, ord) ^ 2u, 1);
+                              if (xo) xo->val = slot + 1u; }
     if (ce) {   /* push this slot onto the key's chain (val = head + 1, 0 = empty) */
         s_fsr_next[ring][slot] = ce->val ? ce->val - 1u : 0xFFFFFFFFu;
         ce->val = slot + 1u;
@@ -273,8 +326,14 @@ static PfnFfxQuery          p_ffxQuery;
 static ffxContext s_fsr_ctx; static u32 s_fsr_cw, s_fsr_ch; static int s_fsr_ctx_fail;
 static ID3D12Resource *s_fsr_mv, *s_fsr_z, *s_fsr_out;
 static D3D12_RESOURCE_STATES s_fsr_mv_st, s_fsr_z_st, s_fsr_out_st;
+/* v189: reactive mask (R8): blended draws (leaves, smoke, sparks) mark where FSR
+ * should lean on the current frame instead of history. They write no motion or
+ * depth, so with no mask a tree's leaves reprojected with the sky behind them and
+ * smeared up close. RSX_FSR_REACTIVE=<0..1> value written (default 0.6, 0 = off). */
+static ID3D12Resource *s_fsr_rx; static D3D12_RESOURCE_STATES s_fsr_rx_st;
+static float fsr_rx_val(void) { static float v = -1.0f; if (v < 0.0f) { const char* e = getenv("RSX_FSR_REACTIVE"); v = e ? (float)atof(e) : 0.6f; if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f; } return v; }
 static ID3D12DescriptorHeap* s_fsr_rtv_heap;
-static ID3D12RootSignature* s_mv_rs; static ID3DBlob* s_mv_ps; static int s_mv_init_fail;
+static ID3D12RootSignature* s_mv_rs; static ID3DBlob* s_mv_ps; static ID3DBlob* s_rx_ps; static int s_mv_init_fail;
 static int s_fsr_slot = -1;          /* off_rt slot of the frame's jittered scene */
 static u32 s_fsr_frame_r;            /* record frame number of the scene being built */
 static int s_fsr_mv_started, s_fsr_done;
@@ -327,6 +386,7 @@ static void fsr_release(void)
     s_fsr_ctx = NULL;
     if (s_fsr_mv)  { grave_defer(s_fsr_mv);  s_fsr_mv = NULL; }
     if (s_fsr_z)   { grave_defer(s_fsr_z);   s_fsr_z = NULL; }
+    if (s_fsr_rx)  { grave_defer(s_fsr_rx);  s_fsr_rx = NULL; }
     if (s_fsr_out) { grave_defer(s_fsr_out); s_fsr_out = NULL; }
     s_fsr_cw = s_fsr_ch = 0;
 }
@@ -377,20 +437,23 @@ static int fsr_ensure(u32 w, u32 h, DXGI_FORMAT colour_fmt)
             fprintf(stderr, "[FSR] upscaler provider: %s%c", pv.versionName, 10);
     }
     if (!s_fsr_rtv_heap) {
-        D3D12_DESCRIPTOR_HEAP_DESC hd = {0}; hd.NumDescriptors = 2; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {0}; hd.NumDescriptors = 3; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         s_d3d.device->lpVtbl->CreateDescriptorHeap(s_d3d.device, &hd, &IID_ID3D12DescriptorHeap, (void**)&s_fsr_rtv_heap);
     }
     static const float zero4[4] = {0, 0, 0, 0}, one4[4] = {1, 1, 1, 1};
     s_fsr_mv  = fsr_tex(w, h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, zero4);
     s_fsr_z   = fsr_tex(w, h, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, one4);
+    s_fsr_rx  = fsr_tex(w, h, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET, zero4);
+    s_fsr_rx_st = D3D12_RESOURCE_STATE_RENDER_TARGET;
     s_fsr_out = fsr_tex(w, h, colour_fmt, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, NULL);
     s_fsr_mv_st = s_fsr_z_st = D3D12_RESOURCE_STATE_RENDER_TARGET; s_fsr_out_st = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    if (!s_fsr_rtv_heap || !s_fsr_mv || !s_fsr_z || !s_fsr_out) {
+    if (!s_fsr_rtv_heap || !s_fsr_mv || !s_fsr_z || !s_fsr_rx || !s_fsr_out) {
         fprintf(stderr, "[FSR] target allocation failed -- FSR off%c", 10);
         fsr_release(); s_fsr_ctx_fail = 1; return 0;
     }
     s_d3d.device->lpVtbl->CreateRenderTargetView(s_d3d.device, s_fsr_mv, NULL, fsr_rtv(0));
     s_d3d.device->lpVtbl->CreateRenderTargetView(s_d3d.device, s_fsr_z, NULL, fsr_rtv(1));
+    s_d3d.device->lpVtbl->CreateRenderTargetView(s_d3d.device, s_fsr_rx, NULL, fsr_rtv(2));
     s_fsr_cw = w; s_fsr_ch = h;
     s_fsr_last_frame = 0;
     fprintf(stderr, "[FSR] native AA at %ux%u%c", w, h, 10);
@@ -400,9 +463,10 @@ static int fsr_ensure(u32 w, u32 h, DXGI_FORMAT colour_fmt)
 /* ---- motion-vector pass: shaders + pipelines ---- */
 static const char s_mv_ps_hlsl[] =
 "struct MVOut { float4 pos:SV_Position; float4 cur:TEXCOORD0; float4 prv:TEXCOORD1; };\n"
-"struct MVT { float2 mv:SV_Target0; float z:SV_Target1; };\n"
+"struct MVT { float2 mv:SV_Target0; float z:SV_Target1; float rx:SV_Target2; };\n"
+"#ifndef RXV\n#define RXV 0.0\n#endif\n"
 "MVT main(MVOut i) {\n"
-"    MVT o; o.z = i.prv.z > 1e29 ? i.cur.z : i.pos.z;\n"
+"    MVT o; o.rx = RXV; o.z = i.prv.z > 1e29 ? i.cur.z : i.pos.z;\n"
 "    if (abs(i.prv.w) < 1e-6 || abs(i.cur.w) < 1e-6) { o.mv = float2(0, 0); return o; }\n"
 "    float2 c = i.cur.xy / i.cur.w, p = i.prv.xy / i.prv.w;\n"
 "    o.mv = (p - c) * float2(0.5, -0.5);\n"   /* UV units, previous minus current */
@@ -434,7 +498,11 @@ static int mv_init(void)
         if (err) err->lpVtbl->Release(err);
         s_mv_init_fail = 1; return 0;
     }
-    if (err) err->lpVtbl->Release(err);
+    if (err) err->lpVtbl->Release(err); err = NULL;
+    { char tx[sizeof s_mv_ps_hlsl + 64];   /* v189: same shader, reactive value baked in */
+      const int k = snprintf(tx, sizeof tx, "#define RXV %.4f\n%s", fsr_rx_val(), s_mv_ps_hlsl);
+      if (FAILED(shc_compile(tx, (size_t)k, "fsr_rx_ps", "main", "ps_5_0", &s_rx_ps, &err))) s_rx_ps = NULL;
+      if (err) err->lpVtbl->Release(err); }
     return 1;
 }
 
@@ -521,7 +589,7 @@ static DWORD WINAPI mv_worker(LPVOID p)
             ID3DBlob *vb = NULL, *e = NULL;
             HRESULT hr = shc_compile(m->text, strlen(m->text), "fsr_mv_vs", "main", "vs_5_0", &vb, &e);
             if (FAILED(hr) || !vb) {
-                static int n = 0; if (n++ < 4) {
+                static int n = 0; if (n < 4 && ++n) {
                     fprintf(stderr, "[FSR] MV VS compile failed (vs 0x%08X gf %d): %s%c", m->hash, m->gf,
                             e ? (const char*)e->lpVtbl->GetBufferPointer(e) : "?", 10);
                     FILE* f = fopen("logs/fsr_mv_fail.hlsl", "w"); if (f) { fputs(m->text, f); fclose(f); } }
@@ -565,13 +633,14 @@ static ID3DBlob* mv_get_vs(int vreal, int gf)
     SetEvent(s_mvq_ev);
     return NULL;
 }
-static ID3D12PipelineState* mv_get_pso(const D3D12DrawRecord* dr)
+static ID3D12PipelineState* mv_get_pso(const D3D12DrawRecord* dr, int rx)
 {
+    if (rx && !s_rx_ps) return NULL;
     const int gf = dr->gf ? 1 : 0;
     const int vreal = dr->vs_idx;
     if (vreal < 0 || vreal >= s_d3d.vp_vs_n || s_d3d.vp_vs[vreal].pending) return NULL;
     const u32 hash = s_d3d.vp_vs[vreal].hash;
-    const u8 cull = (u8)(dr->cull & 7u);
+    const u8 cull = (u8)((dr->cull & 7u) | (rx ? 0x80u : 0u));
     u32 i = (hash * 2654435761u ^ ((u32)gf << 3 | cull) * 40503u) & (MV_PSO_N - 1u);
     for (u32 n = 0; n < MV_PSO_N; n++, i = (i + 1u) & (MV_PSO_N - 1u)) {
         if (!s_mv_pso[i].used) break;
@@ -590,17 +659,33 @@ static ID3D12PipelineState* mv_get_pso(const D3D12DrawRecord* dr)
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; memset(&pd, 0, sizeof pd);
     pd.pRootSignature = s_mv_rs;
     pd.VS.pShaderBytecode = vs->lpVtbl->GetBufferPointer(vs); pd.VS.BytecodeLength = vs->lpVtbl->GetBufferSize(vs);
-    pd.PS.pShaderBytecode = s_mv_ps->lpVtbl->GetBufferPointer(s_mv_ps); pd.PS.BytecodeLength = s_mv_ps->lpVtbl->GetBufferSize(s_mv_ps);
+    { ID3DBlob* ps = rx ? s_rx_ps : s_mv_ps;
+      pd.PS.pShaderBytecode = ps->lpVtbl->GetBufferPointer(ps); pd.PS.BytecodeLength = ps->lpVtbl->GetBufferSize(ps); }
     pd.InputLayout.pInputElementDescs = gf ? NULL : il; pd.InputLayout.NumElements = gf ? 0 : 16;
     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
     pd.RasterizerState.CullMode = (dr->cull & 1u) ? ((dr->cull & 2u) ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK) : D3D12_CULL_MODE_NONE;
     pd.RasterizerState.FrontCounterClockwise = (dr->cull & 4u) ? TRUE : FALSE;
-    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    pd.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    /* v189: the motion pass tests against the scene's depth (LEQUAL) with its own
+     * compile of the game's VS. Trees sway with sin() wind math, and the separate
+     * compile rounds a hair differently -- the depth came out 1-2 units behind the
+     * scene's in patches, those leaf pixels failed the test and kept "no motion"
+     * (patchy ghosting). Pull the motion pass slightly toward the camera.
+     * RSX_FSR_MV_BIAS=<D24 units> (default 16, 0 = off). */
+    { static int bz = -1; if (bz < 0) { const char* e = getenv("RSX_FSR_MV_BIAS"); bz = e ? atoi(e) : 16; }
+      if (bz > 0) { pd.RasterizerState.DepthBias = -bz; pd.RasterizerState.SlopeScaledDepthBias = -2.0f; } }
+    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = rx ? 0 : D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.BlendState.RenderTarget[1].RenderTargetWriteMask = rx ? 0 : D3D12_COLOR_WRITE_ENABLE_ALL;
+    if (rx) {   /* v189: reactive = max over the blended layers */
+        D3D12_RENDER_TARGET_BLEND_DESC* b = &pd.BlendState.RenderTarget[2];
+        b->BlendEnable = TRUE; b->SrcBlend = b->DestBlend = D3D12_BLEND_ONE; b->BlendOp = D3D12_BLEND_OP_MAX;
+        b->SrcBlendAlpha = b->DestBlendAlpha = D3D12_BLEND_ONE; b->BlendOpAlpha = D3D12_BLEND_OP_MAX;
+        b->LogicOp = D3D12_LOGIC_OP_NOOP;
+        b->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED;
+    }
     pd.BlendState.IndependentBlendEnable = TRUE;
     pd.SampleMask = UINT_MAX;
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    pd.NumRenderTargets = 2; pd.RTVFormats[0] = DXGI_FORMAT_R16G16_FLOAT; pd.RTVFormats[1] = DXGI_FORMAT_R32_FLOAT;
+    pd.NumRenderTargets = 3; pd.RTVFormats[0] = DXGI_FORMAT_R16G16_FLOAT; pd.RTVFormats[1] = DXGI_FORMAT_R32_FLOAT; pd.RTVFormats[2] = DXGI_FORMAT_R8_UNORM;
     pd.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
     pd.DepthStencilState.DepthEnable = TRUE;
     pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -608,7 +693,7 @@ static ID3D12PipelineState* mv_get_pso(const D3D12DrawRecord* dr)
     pd.SampleDesc.Count = 1;
     ID3D12PipelineState* pso = NULL;
     if (FAILED(s_d3d.device->lpVtbl->CreateGraphicsPipelineState(s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&pso))) {
-        static int n = 0; if (n++ < 4) fprintf(stderr, "[FSR] MV pipeline failed (vs 0x%08X)%c", hash, 10);
+        static int n = 0; if (n < 4 && ++n) fprintf(stderr, "[FSR] MV pipeline failed (vs 0x%08X)%c", hash, 10);
         pso = NULL;
     }
     s_mv_pso[i].pso = pso;
@@ -627,15 +712,17 @@ static void fsr_mv_replay(u32 d0, u32 d1, D3D12_CPU_DESCRIPTOR_HANDLE dsv, int r
     ID3D12GraphicsCommandList* cl = s_d3d.cmd_list;
     fsr_barrier(s_fsr_mv, &s_fsr_mv_st, D3D12_RESOURCE_STATE_RENDER_TARGET);
     fsr_barrier(s_fsr_z, &s_fsr_z_st, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    D3D12_CPU_DESCRIPTOR_HANDLE rh[2] = { fsr_rtv(0), fsr_rtv(1) };
+    fsr_barrier(s_fsr_rx, &s_fsr_rx_st, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_CPU_DESCRIPTOR_HANDLE rh[3] = { fsr_rtv(0), fsr_rtv(1), fsr_rtv(2) };
     if (!s_fsr_mv_started) {
         static const float z4[4] = {0, 0, 0, 0}, o4[4] = {1, 1, 1, 1};
         cl->lpVtbl->ClearRenderTargetView(cl, rh[0], z4, 0, NULL);
         cl->lpVtbl->ClearRenderTargetView(cl, rh[1], o4, 0, NULL);
+        cl->lpVtbl->ClearRenderTargetView(cl, rh[2], z4, 0, NULL);
         s_fsr_mv_started = 1;
     }
     if (s_fsr_ab == 4) return;   /* v184 diag: no motion / depth data (cleared: still, far) */
-    cl->lpVtbl->OMSetRenderTargets(cl, 2, rh, FALSE, &dsv);
+    cl->lpVtbl->OMSetRenderTargets(cl, 3, rh, FALSE, &dsv);
     cl->lpVtbl->SetGraphicsRootSignature(cl, s_mv_rs);
     if (s_gf_buf)
         cl->lpVtbl->SetGraphicsRootShaderResourceView(cl, 2, s_gf_buf->lpVtbl->GetGPUVirtualAddress(s_gf_buf) + (u64)T_PARITY * GF_CAP);
@@ -648,24 +735,35 @@ static void fsr_mv_replay(u32 d0, u32 d1, D3D12_CPU_DESCRIPTOR_HANDLE dsv, int r
         const D3D12DrawRecord* dr = &T_DRAWS[d];
         if (!dr->is_vp || dr->is_clear || dr->fsr != 1 || !dr->fp_addr) continue;
         if (dr->topology != RSX_TOPOLOGY_TRIANGLES) continue;
-        if (dr->blend_key & 1u) continue;                                  /* blended: no motion */
+        /* blended: no motion -- except blending set to ONE,ZERO (= replace), which is
+         * opaque: v188, outdoor terrain is drawn that way and had no motion/depth
+         * (ground smeared under FSR). Blend key: bit0 on, src bits 1-5, dst 6-10. */
+        const int rx = (dr->blend_key & 1u) && !(((dr->blend_key >> 1) & 31u) == 2u && ((dr->blend_key >> 6) & 31u) == 1u);
+        if (rx && fsr_rx_val() <= 0.0f) continue;   /* v189: blended -> reactive mask only */
         /* v184i: colour writes off = occlusion-query boxes / depth-only passes
          * (185 per frame in the Grimsby factory). Not part of the picture; each
          * box stamped its own (mismatched) motion over what was behind it --
          * over half of the bad motion pixels. */
-        if ((dr->cmask & 0xFu) == 0u) continue;
+        /* v189: ...but a colour-off draw that WRITES depth is a depth pre-pass: the
+         * trash heaps (and other soft-edged props) lay their depth down colour-off,
+         * then draw their colour blended with depth writes off. Skipping both left
+         * no motion there -- and their depth hid the floor behind them too, so the
+         * whole heap kept "still, far" and smeared. Occlusion boxes don't write
+         * depth. RSX_FSR_MV_ZPRE=0 = skip every colour-off draw (v188). */
+        { static int zp = -1; if (zp < 0) { const char* e = getenv("RSX_FSR_MV_ZPRE"); zp = e ? atoi(e) : 1; }
+          if ((dr->cmask & 0xFu) == 0u && !(zp && (dr->cull & 0x400u) && (dr->cull & 0x200u))) continue; }
         if ((dr->cull & 0x100u) && !(dr->cull & 0x200u)) continue;         /* depth test off */
         /* v184: alpha-cutout draws (alpha test or KIL in the program). The
          * motion PS has no cutout, so a grass card / fence / branch quad wrote
          * its motion and depth over the background showing through its holes:
          * ghost trails around grass and crawling far edges. Skipped, the holes
          * keep the motion of what is behind them. RSX_FSR_MV_CUTOUT=1 = old. */
-        { static int co = -1; if (co < 0) { const char* e = getenv("RSX_FSR_MV_CUTOUT"); co = e ? atoi(e) : 0; }
+        { static int co = -1; if (co < 0) { const char* e = getenv("RSX_FSR_MV_CUTOUT"); co = e ? atoi(e) : 1; }   /* v188: on (cut-outs had no motion -> foliage smeared) */
           if (!co && (((dr->alpha_ctl >> 16) & 1u) || fp_kil_has(dr->fp_addr))) { ncut++; continue; } }
         if (dr->vp_w && dr->vp_w < rt->w) continue;                        /* sub-viewport pass */
         if (fpkill_match(dr->fp_addr)) continue;
         if (!dr->ib_count && !dr->vertex_count) continue;
-        ID3D12PipelineState* pso = mv_get_pso(dr);
+        ID3D12PipelineState* pso = mv_get_pso(dr, rx);
         if (!pso) continue;
         if (pso != last) { cl->lpVtbl->SetPipelineState(cl, pso); last = pso; }
         D3D12_VIEWPORT vp = {0, 0, tw, th, 0.0f, 1.0f};
@@ -802,6 +900,8 @@ void fsr_cap_dump(const char* dir, u32 fi, u32 nd)
         cap_readback_write(s_fsr_mv, s_fsr_cw, s_fsr_ch, DXGI_FORMAT_R16G16_FLOAT, s_fsr_mv_st, fi, path); }
     if (s_fsr_z) { snprintf(path, sizeof path, "%s/fsr_z.raw", dir);
         cap_readback_write(s_fsr_z, s_fsr_cw, s_fsr_ch, DXGI_FORMAT_R32_FLOAT, s_fsr_z_st, fi, path); }
+    if (s_fsr_rx) { snprintf(path, sizeof path, "%s/fsr_rx.raw", dir);
+        cap_readback_write(s_fsr_rx, s_fsr_cw, s_fsr_ch, DXGI_FORMAT_R8_UNORM, s_fsr_rx_st, fi, path); }
     snprintf(path, sizeof path, "%s/fsr_draws.txt", dir);
     FILE* f = fopen(path, "w");
     if (f) {
@@ -839,6 +939,7 @@ static void fsr_dispatch(void)
     off_rt_transition(slot, rd);
     fsr_barrier(s_fsr_mv, &s_fsr_mv_st, rd);
     fsr_barrier(s_fsr_z, &s_fsr_z_st, rd);
+    fsr_barrier(s_fsr_rx, &s_fsr_rx_st, rd);
     fsr_barrier(s_fsr_out, &s_fsr_out_st, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     struct ffxDispatchDescUpscale dd; memset(&dd, 0, sizeof dd);
@@ -847,6 +948,8 @@ static void fsr_dispatch(void)
     dd.color  = fsr_res(rt->res, (DXGI_FORMAT)rt->dxgi, w, h, FFX_API_RESOURCE_USAGE_READ_ONLY, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
     dd.depth  = fsr_res(s_fsr_z, DXGI_FORMAT_R32_FLOAT, w, h, FFX_API_RESOURCE_USAGE_READ_ONLY, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
     dd.motionVectors = fsr_res(s_fsr_mv, DXGI_FORMAT_R16G16_FLOAT, w, h, FFX_API_RESOURCE_USAGE_READ_ONLY, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+    if (fsr_rx_val() > 0.0f)
+        dd.reactive = fsr_res(s_fsr_rx, DXGI_FORMAT_R8_UNORM, w, h, FFX_API_RESOURCE_USAGE_READ_ONLY, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
     dd.output = fsr_res(s_fsr_out, (DXGI_FORMAT)rt->dxgi, w, h, FFX_API_RESOURCE_USAGE_UAV, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     float jx, jy; fsr_jitter(s_fsr_frame_r, &jx, &jy);
     dd.jitterOffset.x = jx; dd.jitterOffset.y = jy;
@@ -882,7 +985,7 @@ static void fsr_dispatch(void)
     if (s_gf_buf)
         cl->lpVtbl->SetGraphicsRootShaderResourceView(cl, 3, s_gf_buf->lpVtbl->GetGPUVirtualAddress(s_gf_buf) + (u64)T_PARITY * GF_CAP);
     if (rc != FFX_API_RETURN_OK) {
-        static int n = 0; if (n++ < 5) fprintf(stderr, "[FSR] dispatch failed (%u)%c", (unsigned)rc, 10);
+        static int n = 0; if (n < 5 && ++n) fprintf(stderr, "[FSR] dispatch failed (%u)%c", (unsigned)rc, 10);
         return;
     }
     { static u32 nd = 0, nr = 0, gap = 0; nd++; if (dd.reset) { nr++; if (s_fsr_last_frame) gap += s_fsr_frame_r - s_fsr_last_frame; }

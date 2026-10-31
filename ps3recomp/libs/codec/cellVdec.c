@@ -118,10 +118,22 @@ static void vdec_on_picture(void* ctx, const VdecFfPicture* pic)
      * sends every one of them) gets the next one on the stream's clock; a
      * player that paces display by PTS otherwise never shows a second picture. */
     const u32 ticks = pic->frame_ticks ? pic->frame_ticks : 3003u;
-    const u64 pts = au->pts == ~0ull ? v->nextPts : au->pts;
+    /* Resistance port (v192): Fall of Man's own movie demuxer sends every AU
+     * with pts = {upper 0, lower 0xFFFFFFFF}: "no time stamp" in the low word
+     * only (a PTS is 33 bits; the upper word just carries bit 32). That was
+     * taken as a real PTS, so every picture of a movie had the SAME time stamp.
+     * Suspected cause of the York intro movie jumping back a frame or two about
+     * every 1.5 s (user): a player that orders its decoded pictures by time
+     * stamp cannot tell them apart. A low word of
+     * 0xFFFFFFFF is now invalid too and gets the next stamp on the stream's
+     * clock. VDEC_PTS_SYNTH=0 = old. */
+    static int s_synth = -1;
+    if (s_synth < 0) { const char* e = getenv("VDEC_PTS_SYNTH"); s_synth = e ? atoi(e) : 1; }
+    const int inval = au->pts == ~0ull || (s_synth && (u32)au->pts == 0xFFFFFFFFu);
+    const u64 pts = inval ? v->nextPts : au->pts;
     v->nextPts = pts + ticks;
     q->item.pts       = pts;
-    q->item.dts       = au->dts == ~0ull ? pts : au->dts;
+    q->item.dts       = (au->dts == ~0ull || (s_synth && (u32)au->dts == 0xFFFFFFFFu)) ? pts : au->dts;
     q->item.userData  = au->userData;
     q->item.status    = 0;
     q->item.picFmt    = CELL_VDEC_PIC_FMT_YUV420P;

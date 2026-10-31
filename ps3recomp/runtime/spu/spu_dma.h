@@ -1568,7 +1568,12 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
                     cmd, lsa, (unsigned long long)ea, size, tag);
         } else if (_pn == 96)
             fprintf(stderr, "[spurs-pm] DMA trace suppressed from here\n");
-        _pn++;
+        /* v190d: stop counting once past the cap. _pn counted every policy
+         * DMA forever; after ~2^31 of them (a few hours of play) the int
+         * wrapped negative, "_pn < 96" was true again and every DMA printed a
+         * line: 76k log lines in a minute and the game at 5 fps (user, after
+         * a long session: "heard glass break and dropped to 5 fps"). */
+        if (_pn <= 96) _pn++;
     }
 
     /* Execute the transfer.

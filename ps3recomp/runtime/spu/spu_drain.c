@@ -19,6 +19,8 @@ typedef struct spu_irq_frame {
 
 /* Pending cross-function transfer target for this host thread's SPU context. */
 SPU_THREAD_LOCAL void (*g_spu_trampoline_fn)(spu_context*) = 0;
+/* v191 (tools/spu_group_entry.py): the address a per-chunk stub wants its merged group to resume at. */
+SPU_THREAD_LOCAL uint32_t g_spu_grp_entry = 0;
 SPU_THREAD_LOCAL uint32_t g_spu_pch[8];
 SPU_THREAD_LOCAL unsigned g_spu_pch_n;
 

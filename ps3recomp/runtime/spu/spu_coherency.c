@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "ps3emu/log_first.h"
 
 #ifdef __cplusplus
@@ -232,6 +233,35 @@ void spu_coh_notify_write_except(uint32_t ea, const void* self)
     }
 }
 
+/* v190e diag: which host threads take reservations away on the line whose
+ * PUTLLCs fail most (spu_channels.c picks it every 5 s and prints this). */
+volatile uint32_t g_coh_hot_line = 0xFFFFFFFFu;
+volatile long g_coh_kill_n[8]; volatile unsigned long g_coh_kill_tid[8];
+/* v190f: and where in the host code the killing writes come from (sampled
+ * call stacks, exe RVAs -- symbolize with the build's pdb). */
+volatile unsigned long long g_coh_kill_st[8][4]; volatile long g_coh_kill_stn[8];
+static void coh_note_kill(void)
+{
+#ifdef _WIN32
+    { static volatile long smp;
+      if ((InterlockedIncrement(&smp) & 31) == 0) {
+          void* fr[6] = {0}; const unsigned short nf = RtlCaptureStackBackTrace(1, 6, fr, NULL);
+          const unsigned long long mb = (unsigned long long)GetModuleHandleA(NULL);
+          unsigned long long k[4] = {0, 0, 0, 0};
+          for (int i = 0; i < 4 && i + 1 < nf; i++) k[i] = (unsigned long long)fr[i + 1] - mb;
+          for (int i = 0; i < 8; i++) {
+              if (g_coh_kill_stn[i] && !memcmp((const void*)g_coh_kill_st[i], k, sizeof k)) { InterlockedIncrement(&g_coh_kill_stn[i]); break; }
+              if (!g_coh_kill_stn[i]) { memcpy((void*)g_coh_kill_st[i], k, sizeof k); g_coh_kill_stn[i] = 1; break; }
+          }
+      } }
+    const unsigned long t = GetCurrentThreadId();
+    for (int i = 0; i < 8; i++) {
+        if (g_coh_kill_tid[i] == t) { InterlockedIncrement(&g_coh_kill_n[i]); return; }
+        if (g_coh_kill_tid[i] == 0) { g_coh_kill_tid[i] = t; InterlockedIncrement(&g_coh_kill_n[i]); return; }
+    }
+#endif
+}
+
 void spu_coh_notify_write(uint32_t ea)
 {
     uint32_t line = ea & ~127u;
@@ -240,6 +270,7 @@ void spu_coh_notify_write(uint32_t ea)
         spu_context* c = entry->ctx;
         if (!c) continue;
         if (c->resv_valid && (c->resv_ea & ~127u) == line) {
+            if (line == g_coh_hot_line) coh_note_kill();
             c->event_status |= SPU_EVENT_LR;
             c->resv_valid = 0;          /* reservation lost, PUTLLC must fail */
             /* SPU_PUTLLC_WHY=1: name the agent that killed it. A PUTLLC that

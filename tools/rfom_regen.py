@@ -98,6 +98,9 @@ def spu(port, tk, eboot, game, work, stage_raw=None):
         else:
             f = os.path.join(d, 'spu_recomp.c')
             run([sys.executable, os.path.join(HERE, 'spu_regcache.py'), f, f]); run([sys.executable, os.path.join(HERE, 'spu_directhop.py'), f])
+            if n.startswith('jobmod_'):   # v189: registers stay in locals inside a function
+                run([sys.executable, os.path.join(HERE, 'spu_writeback.py'), f, f])
+                run([sys.executable, os.path.join(HERE, 'spu_group_entry.py'), f, f])   # v191: enter merged groups mid-way
         dst = os.path.join(spudir, n)
         if os.path.isdir(dst): shutil.rmtree(dst)
         shutil.copytree(d, dst)

@@ -974,10 +974,22 @@ extern "C" int ppu_stwcx32(uint64_t ea, uint32_t expected, uint32_t val)
                 fprintf(stderr, "[ppu-steals-resv] %llu: PPU CAS on reserved line 0x%08X\n",
                         n, (uint32_t)ea & ~127u); } }
     if (coh) spu_lockline_lock();
+    const int same = exp_raw == new_raw;
     int ok = __atomic_compare_exchange_n((uint32_t*)(vm_base + ea), &exp_raw, new_raw,
                                          0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 1 : 0;
     if (coh) {
-        if (ok) spu_coh_notify_write((uint32_t)ea);
+        /* Resistance port (v190h): a stwcx. that stores the value already there
+         * changes nothing an SPU can see, so it no longer takes the SPUs'
+         * reservations. The main thread's job-list wait (func_000509E8) ORs a
+         * flag that is already set into a word on the WWS job manager's line on
+         * every poll -- ~12k times a second here, far faster than the PPU's own
+         * delay loop runs on hardware -- and each one failed the job manager's
+         * PUTLLC (60-70k failures per 5 s, all "no reservation", the main
+         * thread the only killer), so the job list the main thread waits on
+         * advanced slower. The first store that really sets the bit still
+         * notifies. PPU_STWCX_SAME_NOTIFY=1 = old. */
+        static int s_sn = -1; if (s_sn < 0) s_sn = getenv("PPU_STWCX_SAME_NOTIFY") ? 1 : 0;
+        if (ok && (!same || s_sn)) spu_coh_notify_write((uint32_t)ea);
         spu_lockline_unlock();
     }
     if (ok) ppu_resv_break(ea);
@@ -1053,9 +1065,11 @@ extern "C" int ppu_stdcx64(uint64_t ea, uint64_t expected, uint64_t val)
     if (self && self->reserve_addr != (uint32_t)ea) { resv_unlock(L); return 0; }
     int coh = spu_coh_is_reserved((uint32_t)ea);
     if (coh) spu_lockline_lock();
+    const int same = exp_raw == new_raw;
     int ok = __atomic_compare_exchange_n((uint64_t*)(vm_base + ea), &exp_raw, new_raw, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 1 : 0;
     if (coh) {
-        if (ok) spu_coh_notify_write((uint32_t)ea);
+        static int s_sn = -1; if (s_sn < 0) s_sn = getenv("PPU_STWCX_SAME_NOTIFY") ? 1 : 0;   /* v190h, see ppu_stwcx32 */
+        if (ok && (!same || s_sn)) spu_coh_notify_write((uint32_t)ea);
         spu_lockline_unlock();
     }
     if (ok) { ppu_resv_break(ea); ppu_resv_break(ea + 4); }  /* 8-byte store spans two words */

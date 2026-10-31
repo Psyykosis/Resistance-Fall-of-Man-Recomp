@@ -489,7 +489,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
             if (!SleepConditionVariableCS(&q->not_empty, &q->lock, s_kms) && q->count == 0) {
                 sys_event_t evt = s_last_evt[queue_id - 1];
                 LeaveCriticalSection(&q->lock);
-                { static int n = 0; if (n++ < 16)
+                { static int n = 0; if (n < 16 && ++n)
                     fprintf(stderr, "[evt] EVT_RECV_KICK: q=%u idle %lu ms -> re-delivered last event\n",
                             queue_id, (unsigned long)s_kms); }
                 ctx->gpr[4] = evt.source; ctx->gpr[5] = evt.data1;
@@ -732,7 +732,7 @@ static int event_queue_push(sys_event_queue_info* q, const sys_event_t* evt)
      * find which producer feeds a queue when nothing logs a port_send. */
     { static int s_q = -1; if (s_q < 0) { const char* e = getenv("EVT_PUSHLOG"); s_q = e ? atoi(e) : 0; }
       if (s_q && q == &g_sys_event_queues[s_q - 1]) { static int s_n = 0;
-        if (s_n++ < 200) fprintf(stderr, "[evt-push] q=%d src=0x%llX d=0x%llX/0x%llX/0x%llX ra=%p\n",
+        if (s_n < 200 && ++s_n) fprintf(stderr, "[evt-push] q=%d src=0x%llX d=0x%llX/0x%llX/0x%llX ra=%p\n",
                 s_q, (unsigned long long)evt->source, (unsigned long long)evt->data1,
                 (unsigned long long)evt->data2, (unsigned long long)evt->data3, __builtin_return_address(0)); } }
     /* PS3_EVQSTAT=<n>: every n pushes, report each live queue's push count and

@@ -1134,6 +1134,22 @@ static void nv3089_blit(void)
           rsx_d3d12_composite_from_offscreen(s_nv3089.in_off);
       } }
 #endif
+#ifdef _WIN32
+    /* v189: a copy out of a surface the D3D12 backend renders (the scene) is
+     * done on the GPU too -- the guest-memory copy below moves bytes the RSX
+     * never wrote there (the Auger's through-wall refraction read those: black). */
+    { extern int cellGcmOffsetIsDisplay(u32 offset);
+      extern int rsx_d3d12_blit_from_surface(u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32);
+      const u32 ff = s_nv3089.fmt & 0xFF;
+      const int sl = (s_nv3089.src_dma != 0xFEED0001u), dl = (s_gcm2d.dst_dma != 0xFEED0001u);
+      const u32 l2w = (s_nv309e.fmt >> 16) & 0xFF, l2h = (s_nv309e.fmt >> 24) & 0xFF;
+      const int swz = ff == 3 && s_nv309e.active && s_nv309e.offset && (1u << l2w) == out_w && (1u << l2h) == out_h;
+      if (sl && dl && !swz && (ff == 3 || ff == 7 || ff == 8 || ff == 0xD) &&
+          !cellGcmOffsetIsDisplay(s_gcm2d.dst_offset))
+          rsx_d3d12_blit_from_surface(s_nv3089.in_off, s_nv3089.in_sz & 0xFFFF, s_nv3089.in_sz >> 16, in_pitch,
+                                      s_nv3089.in_uv, s_nv3089.ds_dx, s_nv3089.dt_dy,
+                                      s_gcm2d.dst_offset, dst_pitch, out_x, out_y, out_w, out_h); }
+#endif
     /* NV3089_GATE=<file>: log every blit's geometry while <file> exists, so a
      * capture covers the scene of interest instead of the first N since boot. */
     { static const char* gate = (const char*)-1; static unsigned poll; static int open_gate;
@@ -3673,7 +3689,7 @@ u32* cellGcmGetLabelAddress(u8 index)
         printf("[cellGcmSys] WARNING: GetLabelAddress index %u out of range\n", index);
         return NULL;
     }
-    { static int n = 0; if (n++ < 32)   /* TEMP */
+    { static int n = 0; if (n < 32 && ++n)   /* TEMP */
         fprintf(stderr, "[cellGcmSys] GetLabelAddress(0x%X) -> 0x%08X\n", index,
                 GCM_LABEL_GUEST_BASE + (u32)index * GCM_LABEL_STRIDE); }
     return (u32*)(uintptr_t)(GCM_LABEL_GUEST_BASE + (u32)index * GCM_LABEL_STRIDE);
@@ -3688,7 +3704,7 @@ CellGcmReportData* cellGcmGetReportDataAddress(u32 index)
     }
     /* Resistance port: a GUEST address (the title dereferences it); this
      * returned a host pointer, which the guest saw truncated to garbage. */
-    { static int n = 0; if (n++ < 4) printf("[cellGcmSys] GetReportDataAddress(%u) -> 0x%08X%c", index, GCM_REPORT_GUEST_BASE + index * 16u, 10); }
+    { static int n = 0; if (n < 4 && ++n) printf("[cellGcmSys] GetReportDataAddress(%u) -> 0x%08X%c", index, GCM_REPORT_GUEST_BASE + index * 16u, 10); }
     return (CellGcmReportData*)(uintptr_t)(GCM_REPORT_GUEST_BASE + index * 16u);
 }
 
@@ -4261,7 +4277,7 @@ CellGcmReportData* cellGcmGetReportDataAddressLocation(u32 index, u32 location)
         printf("[cellGcmSys] WARNING: GetReportDataAddressLocation index %u out of range\n", index);
         return NULL;
     }
-    { static int n = 0; if (n++ < 4) printf("[cellGcmSys] GetReportDataAddressLocation(%u, %u) -> 0x%08X%c", index, location, gcm_report_ea(index, location), 10); }
+    { static int n = 0; if (n < 4 && ++n) printf("[cellGcmSys] GetReportDataAddressLocation(%u, %u) -> 0x%08X%c", index, location, gcm_report_ea(index, location), 10); }
     return (CellGcmReportData*)(uintptr_t)gcm_report_ea(index, location);
 }
 
@@ -4270,7 +4286,7 @@ u32 cellGcmGetReportDataLocation(u32 index, u32 location)
 {
     if (index >= CELL_GCM_MAX_REPORT_COUNT)
         return 0;
-    { static int n = 0; if (n++ < 4) printf("[cellGcmSys] GetReportDataLocation(%u, %u)%c", index, location, 10); }
+    { static int n = 0; if (n < 4 && ++n) printf("[cellGcmSys] GetReportDataLocation(%u, %u)%c", index, location, 10); }
     const u32 ea = gcm_report_ea(index, location);
     return ea ? vm_read32(ea + 8u) : 0u;
 }

@@ -288,6 +288,9 @@ static u32 s_gf_off;
 static int s_gf_rec;                      /* the record being built uses GF */
 static u32 s_gf_ib_first;
 static u64 s_gf_draws, s_gf_bytes, s_gf_fallback;
+static u32 s_gf_gen;                      /* v190: bumped whenever s_gf_off restarts (dedup validity) */
+static u64 s_gf_dup_bytes, s_gf_dup_changed;   /* v190 stats: bytes reused, reuse refused (data changed) */
+static int gf_dedup_on(void);
 
 static int gf_enabled(void)
 {
@@ -385,6 +388,13 @@ typedef struct {
     u32   fsr_frame, fsr_prev;
     float fsr_jnx, fsr_jny;
     u8 fsr_mt; u16 fsr_chain; float fsr_bd; u32 fsr_slot, fsr_pslot;   /* v184 diag: how the previous frame was matched */
+    /* v189: NV3089 copy out of a GPU surface (is_clear record, clear_mask 0):
+     * source surface offset and image size, start and step in source pixels. */
+    int   is_blit;
+    u32   bl_src, bl_in_w, bl_in_h;
+    u32   bl_dst;       /* v189c: destination offset (a copy texture, not a render target) */
+    u16   gbc_mask;     /* v189c: units bound to a copy texture */
+    float bl_u0, bl_v0, bl_du, bl_dv;
 } D3D12DrawRecord;
 int fsr_mode(void);
 static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* csrc, const float* epi);
@@ -400,6 +410,7 @@ typedef struct {
     D3D12_RESOURCE_STATES st;          /* tracked resource state */
     int                   used;        /* referenced this frame */
     u64                   last;        /* v126: record-order stamp of its last use as a target */
+    u64                   clast;       /* v189: stamp of its last COLOUR write (draw with cmask, colour clear) */
 } OffRT;
 #define MAX_OFF_RTS  256 /* v171: 64 -> 256. York packs dozens of small shadow maps per frame at changing offsets and sizes; with 64 slots ~26 surfaces a frame were destroyed and re-created (30-40 fps). Slots must stay < 256: tex_rt packs them as 0x1000|slot etc. and unpacks with & 0xFF. Was: demosaic: 6-surface chain x2; Fall of Man: ~20 shadow/FX surfaces a frame, plus their size variants (v126: 48 -> 64) */
 #define RT_SRV_BASE  5   /* SRV heap slots 5..(5+MAX_OFF_RTS-1) hold offscreen-RT SRVs */
@@ -2718,7 +2729,31 @@ static int gf_decode(const rsx_state* st, u32 first, u32 count, u32* ib, u32* pl
     u32 lo = *plo, hi = *phi;
     if (is16) {
         const u16* p = (const u16*)(ip + (u64)first * 2);
-        for (u32 k = 0; k < count; k++) {
+        u32 k = 0;
+        /* v190: 8 indices at a time (byte swap, restart check, min/max). It was
+         * ~8% of the FIFO thread in a Titan fight. A vector holding the restart
+         * index drops to the scalar loop, which stops on it exactly as before. */
+        if (count >= 8) {
+            const __m128i vrv = _mm_set1_epi16((short)rv), flip = _mm_set1_epi16((short)0x8000), z = _mm_setzero_si128();
+            __m128i vmn = _mm_set1_epi16(0x7FFF), vmx = _mm_set1_epi16((short)0x8000);
+            for (; k + 8u <= count; k += 8u) {
+                __m128i x = _mm_loadu_si128((const __m128i*)(p + k));
+                x = _mm_or_si128(_mm_slli_epi16(x, 8), _mm_srli_epi16(x, 8));
+                if (rs && _mm_movemask_epi8(_mm_cmpeq_epi16(x, vrv))) break;
+                const __m128i xf = _mm_xor_si128(x, flip);
+                vmn = _mm_min_epi16(vmn, xf); vmx = _mm_max_epi16(vmx, xf);
+                _mm_storeu_si128((__m128i*)(ib + k), _mm_unpacklo_epi16(x, z));
+                _mm_storeu_si128((__m128i*)(ib + k + 4), _mm_unpackhi_epi16(x, z));
+            }
+            if (k) {
+                vmn = _mm_min_epi16(vmn, _mm_shuffle_epi32(vmn, 0x4E)); vmx = _mm_max_epi16(vmx, _mm_shuffle_epi32(vmx, 0x4E));
+                vmn = _mm_min_epi16(vmn, _mm_shuffle_epi32(vmn, 0xB1)); vmx = _mm_max_epi16(vmx, _mm_shuffle_epi32(vmx, 0xB1));
+                vmn = _mm_min_epi16(vmn, _mm_srli_si128(vmn, 2));       vmx = _mm_max_epi16(vmx, _mm_srli_si128(vmx, 2));
+                const u32 mn = ((u32)_mm_extract_epi16(vmn, 0) ^ 0x8000u) & 0xFFFFu, mx = ((u32)_mm_extract_epi16(vmx, 0) ^ 0x8000u) & 0xFFFFu;
+                if (mn < lo) lo = mn; if (mx > hi) hi = mx;
+            }
+        }
+        for (; k < count; k++) {
             const u32 x = (u32)(u16)((p[k] >> 8) | (p[k] << 8));
             if (rs && x == rv) return 0;
             ib[k] = x; if (x < lo) lo = x; if (x > hi) hi = x;
@@ -2813,6 +2848,9 @@ static int gf_begin(const rsx_state* st, u32 first, u32 count)
         fprintf(stderr, "[GPUFETCH] %llu records on the GPU-fetch path, %llu fell back, %llu MB raw copied%c",
                 (unsigned long long)s_gf_draws, (unsigned long long)s_gf_fallback,
                 (unsigned long long)(s_gf_bytes >> 20), 10);
+    if ((s_gf_draws % 50000u) == 0 && gf_dedup_on())
+        fprintf(stderr, "[GPUFETCH] dedup: %llu MB reused instead of copied, %llu repeats had changed data%c",
+                (unsigned long long)(s_gf_dup_bytes >> 20), (unsigned long long)s_gf_dup_changed, 10);
     if ((s_gf_draws % 50000u) == 0) {
         char wb[256]; int wp = 0;
         for (int w = 1; w < 24; w++) if (s_gf_why[w]) wp += snprintf(wb + wp, sizeof wb - wp, " #%d:%llu", w, (unsigned long long)s_gf_why[w]);
@@ -2840,6 +2878,87 @@ static int gf_extend(const rsx_state* st, u32 first, u32 count)
     s_gfp.lo = lo; s_gfp.hi = hi;
     s_vp_ib_off += count; s_gfp.ib_end = s_vp_ib_off;
     return 1;
+}
+
+/* v190: copy src -> dst (dst may be NULL = hash only) and return a 64-bit
+ * hash of src. dst is 16-byte aligned upload-heap memory (write-combined), so
+ * the copy uses streaming stores. xxh3-style lanes with a position-dependent
+ * key: moved or swapped vertices change the hash. */
+static u64 gf_copy_hash(u8* dst, const u8* src, size_t len)
+{
+    __m128i a0 = _mm_set_epi64x(0x165667B19E3779F9ll, 0x27D4EB2F165667C5ll), a1 = _mm_set_epi64x(0x7FB5D329728E5A1Bll, 0x2545F4914F6CDD1Dll);
+    __m128i a2 = _mm_set_epi64x(0x61C8864680B583EBll, 0x5851F42D4C957F2Dll), a3 = _mm_set_epi64x(0x14057B7EF767814Fll, 0x0A0761D6478BD642ll);
+    __m128i kk = _mm_set_epi64x(0x9E3779B97F4A7C15ll, 0xC2B2AE3D27D4EB4Fll);
+    const __m128i ks = _mm_set_epi64x(0x632BE59BD9B4E019ll, 0x8EBC6AF09C88C6E3ll);
+    size_t i = 0;
+#define GF_LANE(A, V) do { const __m128i _x = _mm_xor_si128((V), kk); \
+        A = _mm_add_epi64(A, _mm_add_epi64(_mm_mul_epu32(_x, _mm_srli_epi64(_x, 32)), _mm_shuffle_epi32((V), 0x4E))); \
+        kk = _mm_add_epi64(kk, ks); } while (0)
+    if (dst) {
+        for (; i + 64 <= len; i += 64) {
+            const __m128i v0 = _mm_loadu_si128((const __m128i*)(src + i)), v1 = _mm_loadu_si128((const __m128i*)(src + i + 16));
+            const __m128i v2 = _mm_loadu_si128((const __m128i*)(src + i + 32)), v3 = _mm_loadu_si128((const __m128i*)(src + i + 48));
+            _mm_stream_si128((__m128i*)(dst + i), v0); _mm_stream_si128((__m128i*)(dst + i + 16), v1);
+            _mm_stream_si128((__m128i*)(dst + i + 32), v2); _mm_stream_si128((__m128i*)(dst + i + 48), v3);
+            GF_LANE(a0, v0); GF_LANE(a1, v1); GF_LANE(a2, v2); GF_LANE(a3, v3);
+        }
+    } else {
+        for (; i + 64 <= len; i += 64) {
+            const __m128i v0 = _mm_loadu_si128((const __m128i*)(src + i)), v1 = _mm_loadu_si128((const __m128i*)(src + i + 16));
+            const __m128i v2 = _mm_loadu_si128((const __m128i*)(src + i + 32)), v3 = _mm_loadu_si128((const __m128i*)(src + i + 48));
+            GF_LANE(a0, v0); GF_LANE(a1, v1); GF_LANE(a2, v2); GF_LANE(a3, v3);
+        }
+    }
+#undef GF_LANE
+    if (dst && i < len) memcpy(dst + i, src + i, len - i);
+    u64 t[8];
+    _mm_storeu_si128((__m128i*)&t[0], a0); _mm_storeu_si128((__m128i*)&t[2], a1);
+    _mm_storeu_si128((__m128i*)&t[4], a2); _mm_storeu_si128((__m128i*)&t[6], a3);
+    u64 h = 0xCBF29CE484222325ull ^ (u64)len;
+    for (int q = 0; q < 8; q++) { h ^= t[q]; h *= 0x100000001B3ull; h ^= h >> 29; }
+    for (; i < len; i++) { h ^= src[i]; h *= 0x100000001B3ull; }
+    h ^= h >> 32; h *= 0xFF51AFD7ED558CCDull; h ^= h >> 29;
+    return h;
+}
+
+/* v190b: a sampled hash for the dedup check: the first and last 256 bytes
+ * plus 64 bytes of every 2 KB in between. The full-length hash (gf_copy_hash)
+ * cost more than the copy it saved -- the source is usually still in cache --
+ * and over a Titan fight not one repeat range had changed mid-frame, so a
+ * sample is enough to catch a buffer the game really rewrote. */
+static u64 gf_sample_hash(const u8* src, size_t len)
+{
+    u64 h = 0xCBF29CE484222325ull ^ ((u64)len * 0x9E3779B97F4A7C15ull);
+#define GF_SH(P, N) do { const u8* _p = (P); for (size_t _i = 0; _i + 8 <= (N); _i += 8) { u64 _w; memcpy(&_w, _p + _i, 8); \
+        h = (h ^ _w) * 0x100000001B3ull; h ^= h >> 31; } } while (0)
+    if (len <= 1024) { GF_SH(src, len & ~(size_t)7); }
+    else {
+        GF_SH(src, 256);
+        for (size_t o = 2048; o + 64 <= len - 256; o += 2048) GF_SH(src + o, 64);
+        GF_SH(src + ((len - 256) & ~(size_t)7), 256);
+    }
+#undef GF_SH
+    for (size_t i = len & ~(size_t)7; i < len; i++) { h ^= src[i]; h *= 0x100000001B3ull; }
+    h ^= h >> 32; h *= 0xFF51AFD7ED558CCDull; h ^= h >> 29;
+    return h;
+}
+
+/* v190: per-frame dedup of the vertex copies. A skinned mesh (a Titan, the
+ * Chimera crowd) is drawn several times a frame -- shadow cascades, depth
+ * pre-pass, the scene -- and every draw copied the same vertex range again:
+ * up to ~9 KB a draw, the FIFO thread's biggest single cost in a Titan fight.
+ * A repeat of a (space, start, length) range seen earlier in this half is
+ * hashed instead of copied, and reuses the earlier copy only if the bytes
+ * hash the same (a buffer the game rewrote mid-frame is copied again).
+ * RSX_GF_DEDUP=0 = old memcpy path. */
+typedef struct { u64 gs; u32 len, dst, gen, par; u64 h; u32 space; } GfDup;
+#define GF_DUP_N 8192u
+static GfDup s_gf_dup[GF_DUP_N];
+static int gf_dedup_on(void)
+{
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("RSX_GF_DEDUP"); en = e ? atoi(e) : 1; }
+    return en;
 }
 
 /* Close the open record: copy its vertex ranges and write its attribute table. */
@@ -2878,11 +2997,46 @@ static void gf_finalize(void)
     }
     u8* half = s_gf_mapped + (size_t)T_PARITY * GF_CAP;
     u32 dst[16];
+    const int dd = gf_dedup_on();
+    int streamed = 0;
     for (int g = 0; g < ng; g++) {
         if (gsp[g] < 0) continue;
         u32 d = (s_gf_off + 15u) & ~15u;
         const u64 len = ge[g] - gs[g];
-        if (gsp[g] == 1) {
+        /* v190: one contiguous host source -> dedup / streaming copy */
+        const u8* src = NULL;
+        if (dd) {
+            if (gsp[g] == 1) { const u32 r = cellGcmResolveLocated(1, (u32)gs[g]); if (r != 0xFFFFFFFFu) src = vm_base + r; }
+            else if (len && (gs[g] >> 20) == ((ge[g] - 1u) >> 20)) {
+                const u32 r = cellGcmResolveLocated(0, (u32)(gs[g] & ~0xFFFFFull));
+                if (r != 0xFFFFFFFFu) src = vm_base + r + (u32)(gs[g] & 0xFFFFFu);
+            }
+        }
+        if (src) {
+            GfDup* slot = NULL; GfDup* hit = NULL;
+            if (len >= 512) {
+                u64 kh = (gs[g] * 0x9E3779B97F4A7C15ull) ^ (len * 0xC2B2AE3D27D4EB4Full) ^ (u64)gsp[g];
+                kh ^= kh >> 31;
+                for (u32 n = 0, i = (u32)kh & (GF_DUP_N - 1u); n < 16; n++, i = (i + 1u) & (GF_DUP_N - 1u)) {
+                    GfDup* e = &s_gf_dup[i];
+                    if (e->gen != s_gf_gen || e->par != (u32)T_PARITY) { if (!slot) slot = e; break; }
+                    if (e->gs == gs[g] && e->len == (u32)len && e->space == (u32)gsp[g]) { hit = e; break; }
+                    if (!slot && n == 15) slot = e;
+                }
+            }
+            const int full = gf_dedup_on() >= 2;   /* RSX_GF_DEDUP=2: whole-range hash (v190) */
+            if (hit) {
+                const u64 h = full ? gf_copy_hash(NULL, src, (size_t)len) : gf_sample_hash(src, (size_t)len);
+                if (h == hit->h) { dst[g] = hit->dst; s_gf_dup_bytes += len; continue; }
+                s_gf_dup_changed++;
+                slot = hit;
+            }
+            u64 h;
+            if (full) { h = gf_copy_hash(half + d, src, (size_t)len); streamed = 1; }
+            else { memcpy(half + d, src, (size_t)len); h = slot ? gf_sample_hash(src, (size_t)len) : 0; }
+            if (slot) { slot->gs = gs[g]; slot->len = (u32)len; slot->space = (u32)gsp[g];
+                        slot->gen = s_gf_gen; slot->par = (u32)T_PARITY; slot->h = h; slot->dst = d; }
+        } else if (gsp[g] == 1) {
             const u32 r = cellGcmResolveLocated(1, (u32)gs[g]);
             if (r == 0xFFFFFFFFu) memset(half + d, 0, (size_t)len);
             else memcpy(half + d, vm_base + r, (size_t)len);
@@ -2900,6 +3054,7 @@ static void gf_finalize(void)
         s_gf_off = d + (u32)len + 16u;
         s_gf_bytes += len;
     }
+    if (streamed) _mm_sfence();   /* v190: streaming stores visible before the GPU reads them */
     for (int k = 0; k < s_gfp.na; k++) {
         const int g = grp[k];
         const long long b = (long long)dst[g] + (long long)s_gfp.off0[k] - (long long)gs[g];
@@ -3617,13 +3772,38 @@ static int fp_apply_clamp_samplers(char* h, size_t cap, u32 mask)
     return n;
 }
 static u32 s_fp_unnorm_dim[16][2];
+static u32 s_fp_unnorm_decl[16][2];   /* v189: declared size when the target is larger (clamp) */
 static u8 s_fp_expand[16];   /* per-unit sign-expand lanes for the next compile */
 static rsx_fp_shadow_desc s_fp_shadow[16];   /* per-unit depth compare for the next compile */
 static void fp_set_shadow(const D3D12DrawRecord* dr, u32* key);
 static void fp_set_unnorm_inner(const D3D12DrawRecord* dr);
+/* v189: MIRROR / MIRROR_ONCE addressing. The static samplers only wrap or
+ * clamp, so a mirrored texture wrapped instead: the Fareye scope's reticle is
+ * one quadrant drawn over the whole lens with mirrored coordinates, and its
+ * right and bottom arms came out as a big wrapped "L" from the centre. The
+ * coordinate is mirrored in the shader (rsx_sampm). Per unit: bit0 u mirror,
+ * bit1 v mirror, bit2 u mirror-once, bit3 v mirror-once. RSX_MIRROR=0 off. */
+static u8 s_fp_mirror[16]; static u32 s_fp_mirror_mask;
 static void fp_set_unnorm(const D3D12DrawRecord* dr)
 {
     fp_set_unnorm_inner(dr);
+    s_fp_mirror_mask = 0;
+    { static int en = -1; if (en < 0) { const char* e = getenv("RSX_MIRROR"); en = e ? atoi(e) : 1; }
+      if (en && dr) {
+          u32 h = s_fp_unnorm_key ? s_fp_unnorm_key : 2166136261u;
+          for (int u = 0; u < RSX_UNITS && u < 16; u++) {
+              s_fp_mirror[u] = 0;
+              if (!dr->tex[u].set || dr->tex[u].cube || (dr->tex[u].fmt & 0x40u)) continue;
+              const u32 a = dr->tex[u].address, mu = a & 0xFu, mv = (a >> 8) & 0xFu;
+              u8 f = 0;
+              if (mu == 2u) f |= 1u; if (mv == 2u) f |= 2u;
+              if (mu >= 6u && mu <= 8u) f |= 4u; if (mv >= 6u && mv <= 8u) f |= 8u;
+              if (!f) continue;
+              s_fp_mirror[u] = f; s_fp_mirror_mask |= 1u << u;
+              h ^= 0x3A000000u | ((u32)u << 8) | f; h *= 16777619u;
+          }
+          if (s_fp_mirror_mask) s_fp_unnorm_key = h | 1u;
+      } }
     s_fp_clamp_mask = 0;
     static int npot = -1;
     if (npot < 0) { const char* v = getenv("RSX_NPOT_CLAMP"); npot = v ? atoi(v) : 1; }
@@ -3699,6 +3879,7 @@ static void fp_set_unnorm_inner(const D3D12DrawRecord* dr)
     u32 h = 2166136261u;
     for (int u = 0; u < RSX_UNITS; u++) {
         s_fp_unnorm_dim[u][0] = s_fp_unnorm_dim[u][1] = 0;
+        s_fp_unnorm_decl[u][0] = s_fp_unnorm_decl[u][1] = 0;
         if (!dr->tex[u].set || !(dr->tex[u].fmt & 0x40u) || dr->tex[u].cube) continue;
         if (!dr->tex[u].w || !dr->tex[u].h) continue;
         s_fp_unnorm_mask |= 1u << u;
@@ -3718,10 +3899,17 @@ static void fp_set_unnorm_inner(const D3D12DrawRecord* dr)
                                                                           : off_rt_find(dr->tex[u].raw);
               if (rt >= 0 && s_d3d.off_rt[rt].w >= dw && s_d3d.off_rt[rt].h >= dh &&
                   (s_d3d.off_rt[rt].w != dw || s_d3d.off_rt[rt].h != dh)) {
+                  /* v189: ...and clamp to the declared size: the RSX clamps a
+                   * 320x180 texture at row 179; the 320x192 target's rows 180+
+                   * hold other data, and the bloom blur pulled it in as blue
+                   * lines along the top and bottom of the screen. */
+                  { static int cl = -1; if (cl < 0) { const char* e = getenv("RSX_UNNORM_CLAMP"); cl = e ? atoi(e) : 1; }
+                    if (cl) { s_fp_unnorm_decl[u][0] = dw; s_fp_unnorm_decl[u][1] = dh; } }
                   dw = s_d3d.off_rt[rt].w; dh = s_d3d.off_rt[rt].h;
               }
           } }
         s_fp_unnorm_dim[u][0] = dw; s_fp_unnorm_dim[u][1] = dh;
+        if (s_fp_unnorm_decl[u][0]) { h ^= 0xC1A3u ^ (s_fp_unnorm_decl[u][0] << 12) ^ s_fp_unnorm_decl[u][1]; h *= 16777619u; }
         h ^= (u32)u; h *= 16777619u; h ^= dw; h *= 16777619u;
         h ^= dh; h *= 16777619u;
     }
@@ -4082,7 +4270,7 @@ static void fp_unify_b1(char* hlsl, size_t cap)
     }
     if (strstr(hlsl, "register(b1)")) {
         static int warned = 0;
-        if (warned++ < 4) fprintf(stderr, "[FPK] unknown b1 declaration left in a program using fp_k%c", 10);
+        if (warned < 4 && ++warned) fprintf(stderr, "[FPK] unknown b1 declaration left in a program using fp_k%c", 10);
     }
     char* ins = NULL;
     const char* marks[] = { "struct PSOutput", "float4 main(", "PSOutput main(" };
@@ -4434,7 +4622,24 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
       for (int i = 0; i < nw; i++) if (!done[i] && fp_addr == want[i]) { done[i] = 1;
           char fn[64]; snprintf(fn, sizeof fn, "logs\\fp_%08X.hlsl", fp_addr);
           FILE* f = fopen(fn, "w"); if (f) { fprintf(f, "/* fp_addr=0x%08X */\n%s", fp_addr, hlsl); fclose(f); } } }
-    if (s_fp_unnorm_mask) {
+    if (s_fp_unnorm_mask) {   /* v189: clamp texel coordinates to the declared size first */
+        for (u32 u = 0; u < 16; u++) {
+            if (!(s_fp_unnorm_mask & (1u << u)) || !s_fp_unnorm_decl[u][0]) continue;
+            char nd[48]; snprintf(nd, sizeof nd, "rsx_tex[%u].Sample(rsx_samp[%u],", u, u);
+            for (char* at = strstr(hlsl, nd); at; at = strstr(at + 1, nd)) {
+                char* arg = at + strlen(nd);
+                char* open = strchr(at, '('); int depth = 0; char* q = open;
+                for (; *q; q++) { if (*q == '(') depth++; else if (*q == ')') { if (!--depth) break; } }
+                if (*q != ')') break;
+                char suf[96]; snprintf(suf, sizeof suf, "), float2(0.5, 0.5), float2(%.1f, %.1f))",
+                                       (double)s_fp_unnorm_decl[u][0] - 0.5, (double)s_fp_unnorm_decl[u][1] - 0.5);
+                static const char pre[] = " clamp((";
+                const size_t sl = strlen(suf), pl = sizeof pre - 1, len = strlen(hlsl);
+                if (len + sl + pl + 1 > sizeof hlsl) break;
+                memmove(q + sl, q, strlen(q) + 1); memcpy(q, suf, sl);
+                memmove(arg + pl, arg, strlen(arg) + 1); memcpy(arg, pre, pl);
+            }
+        }
         int np = rsx_fp_apply_unnorm_scale(hlsl, sizeof hlsl, s_fp_unnorm_mask,
                                            (const u32 (*)[2])s_fp_unnorm_dim, cube_mask);
         static int _n = 0;
@@ -4448,6 +4653,34 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
         static int _n = 0;
         if (PS3_LOG_FIRST(_n, 4))
             fprintf(stderr, "[TEXCLAMP] fp=0x%X units 0x%X: %d sample(s) clamped%c", fp_addr, s_fp_clamp_mask, nc, 10);
+    }
+    if (s_fp_mirror_mask) {   /* v189: mirrored addressing (see s_fp_mirror) */
+        int nm = 0;
+        if (fp_str_replace(hlsl, sizeof hlsl, "SamplerState rsx_samp[16] : register(s0);",
+                "SamplerState rsx_samp[16] : register(s0);\n"
+                "float4 rsx_sampm(Texture2D t, SamplerState s, float2 uv, float4 m) {"
+                " float2 mr = 1.0 - abs((uv - 2.0 * floor(uv * 0.5)) - 1.0); float2 mo = saturate(abs(uv));"
+                " float2 a = uv; a = (m.xy > 0.5) ? mr : a; a = (m.zw > 0.5) ? mo : a; return t.Sample(s, a); }") == 1) {
+            for (u32 u = 0; u < 16; u++) {
+                if (!(s_fp_mirror_mask & (1u << u))) continue;
+                char nd[48]; snprintf(nd, sizeof nd, "rsx_tex[%u].Sample(rsx_samp[%u],", u, u);
+                const u8 f = s_fp_mirror[u];
+                char tail[64]; snprintf(tail, sizeof tail, ", float4(%d, %d, %d, %d))", f & 1, (f >> 1) & 1, (f >> 2) & 1, (f >> 3) & 1);
+                char rpl[64]; snprintf(rpl, sizeof rpl, "rsx_sampm(rsx_tex[%u], rsx_samp[%u],", u, u);
+                const size_t tl = strlen(tail), rl = strlen(rpl), nl = strlen(nd);
+                for (char* at = strstr(hlsl, nd); at; at = strstr(hlsl, nd)) {
+                    char* open = strchr(at, '('); int depth = 0; char* q = open;
+                    for (; *q; q++) { if (*q == '(') depth++; else if (*q == ')') { if (!--depth) break; } }
+                    if (*q != ')') break;
+                    if (strlen(hlsl) + tl + rl + 4 > sizeof hlsl) break;
+                    memmove(q + tl, q + 1, strlen(q + 1) + 1); memcpy(q, tail, tl);   /* ")" -> ", float4(..))" */
+                    memmove(at + rl, at + nl, strlen(at + nl) + 1); memcpy(at, rpl, rl);
+                    nm++;
+                }
+            }
+        }
+        static int _n = 0;
+        if (PS3_LOG_FIRST(_n, 4)) fprintf(stderr, "[MIRROR] fp=0x%X units 0x%X: %d sample(s)%c", fp_addr, s_fp_mirror_mask, nm, 10);
     }
     /* Resistance port: the alpha test. The per-draw b1 slot has carried
      * rsx_alphatest (enable/ref/func) all along, but no program read it, so
@@ -5614,7 +5847,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
                 memcpy(s_fe_atlas, rgba, sizeof s_fe_atlas); s_fe_atlas_pending = 1;
                 fe_put_keycap(_map0, pitch, 376, 12, "ESC");     /* Circle = back   */
                 fe_put_keycap(_map0, pitch, 464, 12, "SPACE");   /* Cross  = select */
-                static int said = 0; if (said++ < 3) fprintf(stderr, "[keycaps] menu button pictures -> ESC / SPACE (%u mip levels, off 0x%08X)%c", nm, off, 10);
+                static int said = 0; if (said < 3 && ++said) fprintf(stderr, "[keycaps] menu button pictures -> ESC / SPACE (%u mip levels, off 0x%08X)%c", nm, off, 10);
             } }
           if (!fe) { static u32 lh[16]; static int nl = 0; int k = 0; for (; k < nl; k++) if (lh[k] == hsh) break;
                      if (k == nl && nl < 16) { lh[nl++] = hsh; fprintf(stderr, "[keycaps] game 512x256 BC3 atlas hash 0x%08X%s%c", hsh, hsh == 0xE82A7DC8u ? " (menu icons)" : "", 10); } }
@@ -5943,7 +6176,7 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
  * Ties a decompiled program to the attribute formats feeding it. */
 static void vs_attr_log(const rsx_state* st, int vs_idx, u32 fp)
 {
-    static int on = -1; if (on < 0) { const char* e = getenv("VSATTR_LOG"); on = e ? atoi(e) : 1; }
+    static int on = -1; if (on < 0) { const char* e = getenv("VSATTR_LOG"); on = e ? atoi(e) : 0; }   /* v189: diag, off by default (per draw) */
     if (!on || !st) return;
     u32 h = 2166136261u;
     h ^= (u32)vs_idx; h *= 16777619u; h ^= fp; h *= 16777619u;
@@ -6314,15 +6547,47 @@ static int rt_variants(void)
     if (e < 0) { const char* v = getenv("RSX_RT_VARIANTS"); e = v ? atoi(v) : 1; }
     return e;
 }
+/* v189: bloom filter of the offsets render targets sit at. off_rt_find scanned
+ * all 256 slots for every texture unit of every draw (several times a draw), and
+ * almost every texture is not a render target: ~20% of the render thread in
+ * Nottingham. Rebuilt from the slots every batch; bits are added as slots get an
+ * offset. A miss is exact, a hit falls through to the scan. */
+static u64 s_rt_bloom[1024];
+static inline u32 rt_bloom_h(u32 off) { return (off * 2654435761u) >> 16; }
+static inline void rt_bloom_add(u32 off) { const u32 h = rt_bloom_h(off); s_rt_bloom[h >> 6] |= 1ull << (h & 63u); }
+static inline int rt_bloom_has(u32 off) { const u32 h = rt_bloom_h(off); return (int)((s_rt_bloom[h >> 6] >> (h & 63u)) & 1u); }
+static void rt_bloom_rebuild(void)
+{
+    memset(s_rt_bloom, 0, sizeof s_rt_bloom);
+    for (int i = 0; i < MAX_OFF_RTS; i++) if (s_d3d.off_rt[i].res) rt_bloom_add(s_d3d.off_rt[i].off);
+}
 static int off_rt_find(u32 off)
 {
-    if (!off) return -1;
+    if (!off || !rt_bloom_has(off)) return -1;
     int best = -1;
     for (int i = 0; i < MAX_OFF_RTS; i++)
         if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].off == off) {
             if (!rt_variants()) return i;
             if (best < 0 || s_d3d.off_rt[i].last > s_d3d.off_rt[best].last) best = i;
         }
+    return best;
+}
+/* v189: the variant at `off` whose COLOUR was written most recently. A pass
+ * that only targets a surface for depth (cmask=0 -- the flare occlusion boxes
+ * on the 32x32 variant of 0x1680000) leaves the colour memory at that address
+ * as the last colour pass wrote it; on the RSX a colour texture there reads
+ * that, not the depth-only variant's untouched (black) colour. The Auger's
+ * through-wall effect (fp 0x16764C1) multiplies by that texture: black aura.
+ * Falls back to off_rt_find when no variant has a colour write. RSX_RT_COLOUR=0 off. */
+static int off_rt_find_col(u32 off)
+{
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("RSX_RT_COLOUR"); en = e ? atoi(e) : 1; }
+    if (!off || !en || !rt_bloom_has(off)) return -1;
+    int best = -1;
+    for (int i = 0; i < MAX_OFF_RTS; i++)
+        if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].off == off && s_d3d.off_rt[i].clast &&
+            (best < 0 || s_d3d.off_rt[i].clast > s_d3d.off_rt[best].clast)) best = i;
     return best;
 }
 /* Mark slot `slot` as the one its offset now resolves to (record order). */
@@ -6382,7 +6647,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
             }
             if (same >= 0) {
                 OffRT* q = &s_d3d.off_rt[same];
-                q->off = off; q->used = 1; q->last = 0;
+                q->off = off; q->used = 1; q->last = 0; q->clast = 0; rt_bloom_add(off);
                 s_rt_reused++;
                 return same;
             }
@@ -6395,7 +6660,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
             if (s_d3d.off_rt[slot].up) { grave_defer(s_d3d.off_rt[slot].up); s_d3d.off_rt[slot].up = NULL; }
             s_rt_evicted++;
         }
-        s_d3d.off_rt[slot].last = 0;
+        s_d3d.off_rt[slot].last = 0; s_d3d.off_rt[slot].clast = 0;
     } else if (slot >= 0) {
         OffRT* r = &s_d3d.off_rt[slot];
         if (r->w == w && r->h == h && r->dxgi == (u32)want_fmt) { r->used = 1; return slot; }
@@ -6438,7 +6703,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
             D3D12_RESOURCE_STATE_COPY_DEST, &cv,
             &IID_ID3D12Resource, (void**)&r->res)))
         return -1;
-    r->off = off; r->w = w; r->h = h; r->dxgi = (u32)want_fmt;
+    r->off = off; r->w = w; r->h = h; r->dxgi = (u32)want_fmt; rt_bloom_add(off);
     r->st = D3D12_RESOURCE_STATE_COPY_DEST;
     r->used = 1;
     s_rt_created++;
@@ -7286,6 +7551,204 @@ static D3D12_PRIMITIVE_TOPOLOGY topo_to_d3d(u32 t)
     }
 }
 
+/* v189: an NV3089 copy whose SOURCE is a surface the GPU renders (the scene).
+ * cellGcmSys does the copy in guest memory, where that surface was never
+ * written, so the destination got stale bytes. Fall of Man copies a window of
+ * the screen around each Auger round into scratch memory at 0x1680000+ and
+ * refracts it (fp 0x16764C1): black blobs. Recorded in draw order instead; the
+ * replay renders the window into a render target at the destination address,
+ * which is what a texture at that address then samples. RSX_GPU_BLIT=0 off. */
+int rsx_d3d12_blit_from_surface(u32 src_off, u32 in_w, u32 in_h, u32 in_pitch, u32 in_uv,
+                                u32 ds_dx, u32 dt_dy, u32 dst_off, u32 dst_pitch,
+                                u32 out_x, u32 out_y, u32 out_w, u32 out_h)
+{
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("RSX_GPU_BLIT"); en = e ? atoi(e) : 0; }   /* v189e: OFF by default -- broke the frame (black/beige screens, flashing, 2 fps) when the Auger fired; see NOTES */
+    if (!en || !src_off || !dst_off || out_x || out_y || !out_w || !out_h || out_w > 4096 || out_h > 4096) return 0;
+    if (dst_pitch != out_w * 4u) return 0;   /* a whole, tightly packed image: a texture of exactly this size */
+    /* v189b: the source offset is the START OF THE COPIED REGION inside the
+     * surface (base + y*pitch + x*4), and IMAGE_IN_SIZE is that region's size,
+     * not the surface's. v189 matched only regions starting at the surface's
+     * first pixel and normalised by the region size, so each strip held the
+     * whole screen squashed (the blue bands of the lens/heat effects) and every
+     * other copy was skipped. Find the surface containing it; coordinates are
+     * in its guest pixels (pitch/4 wide: the 2x-AA scene is 2560 samples wide
+     * in a 1280-wide target). */
+    int si = -1;
+    if (!in_pitch) return 0;
+    for (int i = 0; i < MAX_OFF_RTS; i++) {
+        const OffRT* r = &s_d3d.off_rt[i];
+        if (!r->res || r->w * 4u > in_pitch || src_off < r->off || src_off >= r->off + in_pitch * r->h) continue;
+        if (si < 0 || r->last > s_d3d.off_rt[si].last) si = i;
+    }
+    if (si < 0 || T_DRAWCNT >= MAX_DRAWS) return 0;
+    const u32 sbase = s_d3d.off_rt[si].off, srt_w = s_d3d.off_rt[si].w, srt_h = s_d3d.off_rt[si].h;
+    const u32 d0 = src_off - sbase, ry = d0 / in_pitch, rx = (d0 % in_pitch) / 4u;
+    /* guest width of the surface: its width times the horizontal AA factor the
+     * pitch implies (1, 2 or 4); any other pitch is padding */
+    u32 gw = srt_w;
+    { const u32 f = in_pitch / (srt_w * 4u);
+      if ((f == 2u || f == 4u) && in_pitch == f * srt_w * 4u) gw = srt_w * f; }
+    (void)in_w; (void)in_h;
+    D3D12DrawRecord* dr = &T_DRAWS[T_DRAWCNT++];
+    memset(dr, 0, sizeof(*dr));
+    dr->is_vp = 1; dr->is_clear = 1; dr->is_blit = 1; dr->clear_mask = 0; dr->tex_slot = -1;
+    for (int u = 0; u < RSX_UNITS; u++) dr->tex_rt[u] = -1;
+    /* v189c: the copy lands in a private copy texture, NOT a render target at
+     * dst_off: 0x1680000 is also the bloom source and a shadow/occlusion target,
+     * and making the copies render targets there swapped those passes' targets
+     * (colours flashing, the gun vanishing when the Auger fired). */
+    dr->rt_off = 0; dr->bl_dst = dst_off; dr->rt_w = out_w; dr->rt_h = out_h;
+    dr->bl_src = sbase;
+    dr->bl_in_w = gw; dr->bl_in_h = srt_h;
+    dr->bl_u0 = (float)rx + (float)(in_uv & 0xFFFFu) / 16.0f; dr->bl_v0 = (float)ry + (float)(in_uv >> 16) / 16.0f;
+    dr->bl_du = (float)ds_dx / 1048576.0f;         dr->bl_dv = (float)dt_dy / 1048576.0f;
+    { static int n = 0; if (n < 8) { n++;
+        fprintf(stderr, "[GPUBLIT] 0x%08X in surface 0x%08X (%ux%u guest px) from %.1f,%.1f step %.3f,%.3f -> 0x%08X %ux%u%c",
+                src_off, sbase, gw, srt_h, dr->bl_u0, dr->bl_v0, dr->bl_du, dr->bl_dv, dst_off, out_w, out_h, 10); } }
+    return 1;
+}
+static ID3D12RootSignature* s_gb_rs; static ID3D12PipelineState* s_gb_pso; static int s_gb_fail;
+static const char s_gb_hlsl[] =
+    "Texture2D t0 : register(t0); SamplerState s0 : register(s0);\n"
+    "cbuffer C : register(b0) { float4 k; };\n"
+    "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+    "V vs(uint id : SV_VertexID) { V o; float2 uv = float2((id << 1) & 2, id & 2);\n"
+    "  o.uv = uv; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
+    "float4 ps(V i) : SV_Target { return t0.SampleLevel(s0, k.xy + k.zw * i.uv, 0); }\n";
+static int gb_init(void)
+{
+    if (s_gb_pso) return 1;
+    if (s_gb_fail) return 0;
+    s_gb_fail = 1;
+    ID3D12Device* d = s_d3d.device;
+    D3D12_DESCRIPTOR_RANGE rg = {0};
+    rg.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; rg.NumDescriptors = 1; rg.BaseShaderRegister = 0;
+    D3D12_ROOT_PARAMETER rp[2]; memset(rp, 0, sizeof rp);
+    rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rp[0].DescriptorTable.NumDescriptorRanges = 1; rp[0].DescriptorTable.pDescriptorRanges = &rg;
+    rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rp[1].Constants.ShaderRegister = 0; rp[1].Constants.Num32BitValues = 4;
+    rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_STATIC_SAMPLER_DESC sm = {0};
+    sm.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sm.AddressU = sm.AddressV = sm.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    sm.MaxLOD = D3D12_FLOAT32_MAX; sm.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC rd = {0};
+    rd.NumParameters = 2; rd.pParameters = rp; rd.NumStaticSamplers = 1; rd.pStaticSamplers = &sm;
+    ID3DBlob *sig = NULL, *err = NULL, *vsb = NULL, *psb = NULL;
+    if (FAILED(D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err))) { if (err) err->lpVtbl->Release(err); return 0; }
+    HRESULT hr = d->lpVtbl->CreateRootSignature(d, 0, sig->lpVtbl->GetBufferPointer(sig), sig->lpVtbl->GetBufferSize(sig),
+                                                &IID_ID3D12RootSignature, (void**)&s_gb_rs);
+    sig->lpVtbl->Release(sig);
+    if (FAILED(hr)) return 0;
+    if (FAILED(D3DCompile(s_gb_hlsl, sizeof s_gb_hlsl - 1, "gpu_blit", NULL, NULL, "vs", "vs_5_0", 0, 0, &vsb, &err))) { if (err) err->lpVtbl->Release(err); return 0; }
+    if (FAILED(D3DCompile(s_gb_hlsl, sizeof s_gb_hlsl - 1, "gpu_blit", NULL, NULL, "ps", "ps_5_0", 0, 0, &psb, &err))) { if (err) err->lpVtbl->Release(err); vsb->lpVtbl->Release(vsb); return 0; }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; memset(&pd, 0, sizeof pd);
+    pd.pRootSignature = s_gb_rs;
+    pd.VS.pShaderBytecode = vsb->lpVtbl->GetBufferPointer(vsb); pd.VS.BytecodeLength = vsb->lpVtbl->GetBufferSize(vsb);
+    pd.PS.pShaderBytecode = psb->lpVtbl->GetBufferPointer(psb); pd.PS.BytecodeLength = psb->lpVtbl->GetBufferSize(psb);
+    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.DepthClipEnable = TRUE;
+    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pd.SampleMask = UINT_MAX;
+    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pd.SampleDesc.Count = 1;
+    hr = d->lpVtbl->CreateGraphicsPipelineState(d, &pd, &IID_ID3D12PipelineState, (void**)&s_gb_pso);
+    vsb->lpVtbl->Release(vsb); psb->lpVtbl->Release(psb);
+    if (FAILED(hr)) { s_gb_pso = NULL; fprintf(stderr, "[GPUBLIT] pipeline failed%c", 10); return 0; }
+    s_gb_fail = 0;
+    return 1;
+}
+static int off_rt_find_col(u32 off);   /* fwd */
+/* v189c: copy textures -- (offset, w, h) -> an R8G8B8A8 texture the GPU copy
+ * renders into; a texture of exactly that address and size samples it. */
+#define GBC_N 64
+typedef struct { u32 off, w, h; u64 last; ID3D12Resource* res; D3D12_RESOURCE_STATES st; } GbcTex;
+static GbcTex s_gbc[GBC_N]; static ID3D12DescriptorHeap* s_gbc_rtv; static u64 s_gbc_clock;
+static int gbc_find(u32 off, u32 w, u32 h)
+{
+    for (int i = 0; i < GBC_N; i++) if (s_gbc[i].res && s_gbc[i].off == off && s_gbc[i].w == w && s_gbc[i].h == h) return i;
+    return -1;
+}
+static int gbc_get(u32 off, u32 w, u32 h)
+{
+    int i = gbc_find(off, w, h);
+    if (i >= 0) { s_gbc[i].last = ++s_gbc_clock; return i; }
+    if (!s_gbc_rtv) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd = {0}; hd.NumDescriptors = GBC_N; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        if (FAILED(s_d3d.device->lpVtbl->CreateDescriptorHeap(s_d3d.device, &hd, &IID_ID3D12DescriptorHeap, (void**)&s_gbc_rtv))) return -1;
+    }
+    i = 0;
+    for (int k = 0; k < GBC_N; k++) { if (!s_gbc[k].res) { i = k; break; } if (s_gbc[k].last < s_gbc[i].last) i = k; }
+    if (s_gbc[i].res) { grave_defer(s_gbc[i].res); s_gbc[i].res = NULL; }
+    D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC td = {0};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; td.Width = SC(w); td.Height = SC(h);
+    td.DepthOrArraySize = 1; td.MipLevels = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1; td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN; td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &td,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, NULL, &IID_ID3D12Resource, (void**)&s_gbc[i].res))) { s_gbc[i].res = NULL; return -1; }
+    s_gbc[i].off = off; s_gbc[i].w = w; s_gbc[i].h = h; s_gbc[i].last = ++s_gbc_clock;
+    s_gbc[i].st = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    D3D12_CPU_DESCRIPTOR_HANDLE rh; s_gbc_rtv->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_gbc_rtv, &rh);
+    rh.ptr += (u64)i * s_d3d.device->lpVtbl->GetDescriptorHandleIncrementSize(s_d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    s_d3d.device->lpVtbl->CreateRenderTargetView(s_d3d.device, s_gbc[i].res, NULL, rh);
+    return i;
+}
+static void gbc_transition(int i, D3D12_RESOURCE_STATES to)
+{
+    if (s_gbc[i].st == to) return;
+    D3D12_RESOURCE_BARRIER b = {0};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Transition.pResource = s_gbc[i].res;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    b.Transition.StateBefore = s_gbc[i].st; b.Transition.StateAfter = to;
+    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
+    s_gbc[i].st = to;
+}
+/* Replay side: render dr's window of its source surface into its copy texture. */
+static void gpu_blit_replay(const D3D12DrawRecord* dr)
+{
+    if (!gb_init()) return;
+    const int gi = gbc_find(dr->bl_dst, dr->rt_w, dr->rt_h);
+    if (gi < 0) return;
+    int src = off_rt_find_col(dr->bl_src);
+    if (src < 0) src = off_rt_find(dr->bl_src);
+    if (src < 0 || !s_d3d.off_rt[src].res) return;
+    const float iw = (float)(dr->bl_in_w ? dr->bl_in_w : s_d3d.off_rt[src].w);
+    const float ih = (float)(dr->bl_in_h ? dr->bl_in_h : s_d3d.off_rt[src].h);
+    ID3D12GraphicsCommandList* cl = s_d3d.cmd_list;
+    off_rt_transition(src, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    gbc_transition(gi, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    D3D12_CPU_DESCRIPTOR_HANDLE rh; s_gbc_rtv->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_gbc_rtv, &rh);
+    rh.ptr += (u64)gi * s_d3d.device->lpVtbl->GetDescriptorHandleIncrementSize(s_d3d.device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    cl->lpVtbl->OMSetRenderTargets(cl, 1, &rh, FALSE, NULL);
+    cl->lpVtbl->SetGraphicsRootSignature(cl, s_gb_rs);
+    cl->lpVtbl->SetPipelineState(cl, s_gb_pso);
+    D3D12_GPU_DESCRIPTOR_HANDLE gh;
+    s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh);
+    gh.ptr += (u64)(RT_SRV_BASE + src) * s_d3d.srv_inc;
+    cl->lpVtbl->SetGraphicsRootDescriptorTable(cl, 0, gh);
+    const float k[4] = { dr->bl_u0 / iw, dr->bl_v0 / ih,
+                         (float)dr->rt_w * dr->bl_du / iw, (float)dr->rt_h * dr->bl_dv / ih };
+    cl->lpVtbl->SetGraphicsRoot32BitConstants(cl, 1, 4, k, 0);
+    D3D12_VIEWPORT vp = {0, 0, (float)SC(dr->rt_w), (float)SC(dr->rt_h), 0.0f, 1.0f};
+    D3D12_RECT sc = {0, 0, (LONG)SC(dr->rt_w), (LONG)SC(dr->rt_h)};
+    cl->lpVtbl->RSSetViewports(cl, 1, &vp);
+    cl->lpVtbl->RSSetScissorRects(cl, 1, &sc);
+    cl->lpVtbl->IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cl->lpVtbl->DrawInstanced(cl, 3, 1, 0, 0);
+    gbc_transition(gi, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cl->lpVtbl->SetGraphicsRootSignature(cl, s_d3d.vp_root_sig);
+    cl->lpVtbl->SetGraphicsRootConstantBufferView(cl, 0, s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb));
+    if (s_gf_buf)
+        cl->lpVtbl->SetGraphicsRootShaderResourceView(cl, 3, s_gf_buf->lpVtbl->GetGPUVirtualAddress(s_gf_buf) + (u64)T_PARITY * GF_CAP);
+    { D3D12_GPU_DESCRIPTOR_HANDLE g0; s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &g0);
+      cl->lpVtbl->SetGraphicsRootDescriptorTable(cl, 1, g0); }
+}
+
 /* GCM_GUEST_FB=<off>,<w>,<h>,<pitch> -- present the guest display buffer.
  *
  * A title that composites its final image with the RSX 2D engine assembles it
@@ -7893,10 +8356,12 @@ static void render_frame_impl(void)
      * every non-display surface targeted this frame (so draws binding it as a
      * texture can resolve to it below, whatever the op order). */
     for (int _i = 0; _i < MAX_OFF_RTS; _i++) s_d3d.off_rt[_i].used = 0;
+    rt_bloom_rebuild();   /* v189 */
     for (u32 _d = 0; _d < T_DRAWCNT && _d < MAX_DRAWS; _d++) {
         D3D12DrawRecord* dr = &T_DRAWS[_d];
         dr->rt_slot = (dr->is_vp && dr->rt_off)
                     ? off_rt_get(dr->rt_off, dr->rt_w, dr->rt_h, dr->rt_fmt) : -1;
+        if (dr->is_blit) (void)gbc_get(dr->bl_dst, dr->rt_w, dr->rt_h);   /* v189c */
         for (int _m = 0; _m < 3; _m++)
             dr->rt_mrt_slot[_m] = (dr->is_vp && dr->rt_mrt[_m])
                                 ? off_rt_get(dr->rt_mrt[_m], dr->rt_w, dr->rt_h, dr->rt_fmt) : -1;
@@ -7924,6 +8389,11 @@ static void render_frame_impl(void)
         if (rt_variants()) {
             off_rt_stamp(dr->rt_slot);
             for (int _m = 0; _m < 3; _m++) off_rt_stamp(dr->rt_mrt_slot[_m]);
+            if (dr->is_vp && (dr->is_clear ? (dr->clear_mask & 0xF0u) : (dr->cmask & 0xFu))) {   /* v189 */
+                if (dr->rt_slot >= 0) s_d3d.off_rt[dr->rt_slot].clast = s_d3d.off_rt[dr->rt_slot].last;
+                for (int _m = 0; _m < 3; _m++) if (dr->rt_mrt_slot[_m] >= 0)
+                    s_d3d.off_rt[dr->rt_mrt_slot[_m]].clast = s_d3d.off_rt[dr->rt_mrt_slot[_m]].last;
+            }
         }
         if (dr->is_vp && dr->zeta_off && dr->rt_off && zeta_keyed()) {
             const int rs = rt_variants() ? dr->rt_slot : off_rt_find(dr->rt_off);
@@ -8017,6 +8487,7 @@ static void render_frame_impl(void)
         dr->srv_win = _d;
         s_srv_stage_on = s_reuse; s_srv_stage_n = 0;
         s_srv_stage_base = DRAW_SRV_BASE + ((u32)T_PARITY * MAX_DRAWS + _d) * RSX_UNITS;
+        dr->gbc_mask = 0;
         for (int _u = 0; _u < RSX_UNITS; _u++) {
             u32 wslot = DRAW_SRV_BASE + ((u32)T_PARITY * MAX_DRAWS + _d) * RSX_UNITS + (u32)_u;
             dr->tex_rt[_u] = -1;
@@ -8120,6 +8591,14 @@ static void render_frame_impl(void)
                     }
                 }
             }
+            if (dr->tex[_u].set && (dr->tex[_u].fmt & 0x9Fu) == 0x85u && !dr->tex[_u].cube) {   /* v189c copy texture */
+                const int gi = gbc_find(dr->tex[_u].raw, dr->tex[_u].w, dr->tex[_u].h);
+                if (gi >= 0 && s_gbc_clock - s_gbc[gi].last < 256u) {
+                    dr->gbc_mask |= (u16)(1u << _u);
+                    srv_write(wslot, s_gbc[gi].res, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+                    continue;
+                }
+            }
             if (dr->tex[_u].set) {
                 int rt = off_rt_find(dr->tex[_u].raw);
                 /* v125: a zeta surface read as A8R8G8B8 (zc_convert). */
@@ -8207,6 +8686,14 @@ static void render_frame_impl(void)
                       continue;
                   } }
                 if (rt >= 0) {
+                    { const int rc = off_rt_find_col(dr->tex[_u].raw);   /* v189 */
+                      if (rc >= 0 && rc != rt) {
+                          { static int n = 0; if (n < 6) { n++;
+                              fprintf(stderr, "[RTCOL] unit %d fp=0x%08X 0x%08X: colour from slot %d %ux%u, not depth-only slot %d %ux%u%c",
+                                      _u, dr->fp_addr, dr->tex[_u].raw, rc, s_d3d.off_rt[rc].w, s_d3d.off_rt[rc].h,
+                                      rt, s_d3d.off_rt[rt].w, s_d3d.off_rt[rt].h, 10); } }
+                          rt = rc;
+                      } }
                     dr->tex_rt[_u] = rt;
                     srv_write(wslot, s_d3d.off_rt[rt].res, (DXGI_FORMAT)s_d3d.off_rt[rt].dxgi,
                               D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
@@ -8522,6 +9009,8 @@ static void render_frame_impl(void)
             for (u32 d = 0; d < T_DRAWCNT && d < MAX_DRAWS; d++) {
                 const D3D12DrawRecord* dr = &T_DRAWS[d];
                 if (!dr->is_vp) continue;
+                /* v189: GPU-side NV3089 copy; rebinds its own target, so the next op rebinds */
+                if (dr->is_blit) { gpu_blit_replay(dr); cur_rt = -3; continue; }
                 if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[3] += t - _cA; _cA = t; }   /* previous draw's call + tail */
                 /* The reduced-viewport passes (this title's reflection, drawn
                  * into a region of the same target) finish here -- snapshot
@@ -8712,6 +9201,16 @@ static void render_frame_impl(void)
                 /* Resistance port: live draw filter (logs\\fpkill.txt). */
                 if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[0] += t - _cA; _cA = t; }
                 if (dr->fp_addr && fpkill_match(dr->fp_addr)) continue;
+                /* v189: the Auger's through-wall shimmer (fp 0x16764C1) refracts a copy
+                 * of the screen around the round (unit 1, copied by NV3089 -- see
+                 * rsx_d3d12_blit_from_surface). Drawn only when that copy was made on
+                 * the GPU (unit 1 is a target of exactly the texture's size); otherwise
+                 * it read stale memory and drew a black blob. RSX_AUGER_FX=0 never
+                 * draws it, 2 always does. */
+                { static int ax = -1; if (ax < 0) { const char* e = getenv("RSX_AUGER_FX"); ax = e ? atoi(e) : 1; }
+                  if (dr->fp_addr == 0x016764C1u && ax != 2) {
+                      if (!ax || !(dr->gbc_mask & 2u)) continue;   /* v189c: unit 1 must be a GPU copy */
+                  } }
                 if (dr->fp_addr && s_fpnb_n && fp_in(s_fpnb, s_fpnb_n, dr->fp_addr)) ((D3D12DrawRecord*)dr)->blend_key = 0;
                 if (dr->fp_addr && s_fpnd_n && fp_in(s_fpnd, s_fpnd_n, dr->fp_addr)) ((D3D12DrawRecord*)dr)->cull &= ~0x200u;
                 /* Per-draw pipeline: prefer the guest's own compiled FP; fall
@@ -8988,7 +9487,7 @@ static void render_frame_impl(void)
     s_dbg_last_draws = T_DRAWCNT;
     if (!t_render_thread) {   /* producer state: the FIFO thread's (render_frame resets it under RSX_ASYNC) */
         s_d3d.vb_offset  = 0; /* reset for next frame */
-        s_d3d.vp_vb_offset = 0; s_vp_ib_off = 0; s_gf_off = 0;
+        s_d3d.vp_vb_offset = 0; s_vp_ib_off = 0; s_gf_off = 0; s_gf_gen++;
     }
     T_DRAWCNT = 0;
     T_PARITY = (T_PARITY + 1) % NPAR;  /* next batch's records go to the next third */
@@ -9510,7 +10009,7 @@ static void render_frame(void)
     /* Producer side starts the next batch in the other buffers. */
     T_DRAWS = (T_DRAWS == s_draws_buf[0]) ? s_draws_buf[1] : s_draws_buf[0];
     T_DRAWCNT = 0;
-    s_d3d.vb_offset = 0; s_d3d.vp_vb_offset = 0; s_vp_ib_off = 0; s_gf_off = 0;
+    s_d3d.vb_offset = 0; s_d3d.vp_vb_offset = 0; s_vp_ib_off = 0; s_gf_off = 0; s_gf_gen++;
     T_PARITY = (T_PARITY + 1) % NPAR;
     if (!s_in_midflush) s_batch_cont = 0;   /* as render_frame_impl does for the frame's last batch */
 }
@@ -9711,7 +10210,7 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
     vp_async_drain();
     T_DRAWCNT   = 0;
     s_d3d.vb_offset    = 0;
-    s_d3d.vp_vb_offset = 0; s_vp_ib_off = 0; s_gf_off = 0;
+    s_d3d.vp_vb_offset = 0; s_vp_ib_off = 0; s_gf_off = 0; s_gf_gen++;
 }
 
 static void d3d12_set_render_target(void* ud, const rsx_state* state)
