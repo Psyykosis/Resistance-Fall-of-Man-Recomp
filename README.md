@@ -1,8 +1,8 @@
-# Resistance: Fall of Man — native PC port (heavily WIP)
+# Resistance: Fall of Man — native PC port/recomp (95% finished)
 
 A static recompilation of the PS3 game *Resistance: Fall of Man* into a native Windows program. No emulation: the game's PowerPC and SPU code is translated to C/C++ and compiled for your PC, with a Direct3D 12 renderer, keyboard and mouse controls, and higher resolutions.
 
-> ⚠️ **Early work in progress.** So far it has only been tested **on my pc** (Ryzen 5 3600, Radeon RX 6700 XT, 32 GB RAM, Windows 11) and played **only up to Grimsby**. Everything after Grimsby is untested no man's land: levels may crash, softlock or look wrong. Feel free to report what you find.
+> ⚠️ **Not Perfect.** I myself have only tested it **on my pc** (Ryzen 5 3600, Radeon RX 6700 XT, 32 GB RAM, Windows 11) haven't beat the game, but gotten up to Cheddar Gorge. To my knowledge no one has gotten past there yet, so things could go wrong after. Some crashes may happen but should be few and far between.
 
 > **This repository contains no game files and no game code.** You need your own copy of the game. The setup builds everything game-specific on your PC from that copy.
 
@@ -53,13 +53,13 @@ If you hit a problem, let me know how to reproduce it and what it was, and if yo
 
 ## Known Bugs
 
-- General performance drops. That's mostly the game's SPU jobs (the stuff the PS3's SPUs used to handle), right now they kind of run one after another and the main thread just sits there waiting on them. It's something that needs to be chipped away at over time, it's not a simple fix.
+- General performance drops. That's mostly the game's SPU jobs (the stuff the PS3's SPUs used to handle), right now they kinda run one after another and the main thread just sits there waiting on them. It is basically the known limitation, I haven't found a way around that yet.
 - Sometimes you may randomly fall through the floor, it happened about 4 times across 3 days of testing so it's very rare and unknown what causes it yet, but a crutch has been added so that when it does happen it will hopefully put you back in place before you fall to your death, but I haven't been able to reproduce it to test the fix.
 - Shadows may flicker on and off at some times, but again it's rare and I am not sure what triggers it or how to reproduce it so I just have to play until it happens.
-- In intensive areas, sound may become slightly staticky when FPS/performance drops (most noticeable right when coming out of the crater in York at the very beginning). Same SPU job thing, the sound mixing is one of those jobs so it gets bogged down right along with everything else.
-- FSR causing ghosting with some textures like foliage and trash piles.
+- In intensive areas, sound may or may not become slightly staticky when FPS/performance drops (most noticeable right when coming out of the crater in York at the very beginning). Another SPU job issue, the sound mixing is one of those jobs so it gets bogged down right along with everything else.
+- FSR causing ghosting with some things like the sky at some rare moments.
 - One unknown, Rollers. On RPCS3, Rollers were the biggest problem, they would always crash your game when they come on screen unless you used OpenGL, Rollers would crash the game when on screen. This may be fixed or may not be, considering this uses DirectX 12 and not Vulkan. I have yet to get to where they spawn, I believe it is in Bracknell.
-- Out of bounds water like off the dock in Grimsby has some triangles on it.
+- Out of bounds water like off the dock in Grimsby or under the bridge in Manchester has some triangles on it.
 
 ## Some Plans
 
