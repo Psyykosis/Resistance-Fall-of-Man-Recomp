@@ -56,7 +56,7 @@ struct Setting {
     int sel;
 };
 
-enum { S_DISPLAY, S_WINDOW, S_FPS, S_VSYNC, S_RES, S_FSR, S_ANISO, S_FILTER, S_SHARPEN, S_COUNT };
+enum { S_DISPLAY, S_WINDOW, S_FPS, S_VSYNC, S_RES, S_FSR, S_UPSCALE, S_ANISO, S_FILTER, S_SHARPEN, S_COUNT };
 static std::vector<Setting> g_set = {
     { "display", "Display mode",
       "Borderless fills the screen and lets you Alt+Tab instantly. Windowed uses the window size below. "
@@ -81,8 +81,16 @@ static std::vector<Setting> g_set = {
       { {"1280 x 720  (PS3 original)", "1"}, {"1920 x 1080", "1.5"}, {"2560 x 1440", "2"},
         {"3200 x 1800", "2.5"}, {"3840 x 2160", "3"} }, 2 },
     { "fsr", "Anti-aliasing",
-      "AMD FSR 3.1 smooths jagged edges and shimmer, on any GPU. Experimental: fast motion can ghost slightly.",
-      { {"Off  (PS3 original)", "0"}, {"AMD FSR 3.1", "1"} }, 0 },
+      "AMD FSR 3.1 smooths jagged edges and shimmer, on any GPU. NVIDIA DLAA (DLSS at native resolution) "
+      "does the same with NVIDIA's AI model on GeForce RTX cards - sharper and steadier; it falls back to FSR "
+      "on other GPUs. Experimental: fast motion can ghost slightly.",
+      { {"Off  (PS3 original)", "0"}, {"AMD FSR 3.1", "1"}, {"NVIDIA DLAA (DLSS)", "2"} }, 0 },
+    { "upscale", "Upscaling",
+      "With FSR or DLSS on: draw the 3D scene at a lower resolution and let FSR / DLSS rebuild it at the "
+      "render resolution. Faster, slightly softer. Native = no upscaling (DLAA / FSR native AA). "
+      "The menus and HUD always stay at full resolution.",
+      { {"Native  (anti-aliasing only)", "1"}, {"Quality  (67%)", "0.667"}, {"Balanced  (58%)", "0.58"},
+        {"Performance  (50%)", "0.5"}, {"Ultra Performance  (33%)", "0.333"} }, 0 },
     { "aniso", "Texture filtering",
       "Keeps floors and walls sharp when seen at an angle. 16x costs almost nothing on a modern GPU.",
       { {"Trilinear  (PS3 original)", "0"}, {"Anisotropic 2x", "2"}, {"Anisotropic 4x", "4"},
@@ -145,6 +153,7 @@ static bool save_settings()
     fprintf(f, "set \"RSX_FILTER=%s\"\n", val(S_FILTER));
     fprintf(f, "set \"RSX_SHARPEN=%s\"\n", val(S_SHARPEN));
     fprintf(f, "set \"RSX_FSR=%s\"\n", val(S_FSR));
+    fprintf(f, "set \"RSX_UPSCALE=%s\"\n", val(S_UPSCALE));
     fprintf(f, "set \"RFOM_FOV=%d\"\n", g_fov);
     fclose(f);
     return true;
@@ -570,6 +579,7 @@ static void layout()
             y += SF(18);
             deco(D_H2, RectF(x, y, w, SF(22)), "QUALITY"); y += SF(26);
             layout_setting_row(x, y, w, S_FSR);
+            layout_setting_row(x, y, w, S_UPSCALE);
             layout_setting_row(x, y, w, S_ANISO);
             y += SF(26);
             Widget& b = add(W_BUTTON, RectF(x, y, SF(210), SF(38)), BT_RESET_GFX);

@@ -24,6 +24,13 @@
  * (bloom, colour grade, HUD) is untouched and un-jittered.
  * RSX_FSR_SHARP=<0..1> (default 0.25): FSR's RCAS sharpening.
  * RSX_FSR_DEBUG=1: FSR API validation messages to the log.
+ *
+ * RSX_FSR=2: NVIDIA DLAA (DLSS at native resolution) instead of FSR, on the same
+ * colour / depth / motion / jitter inputs. NVIDIA code lives only in
+ * rfom_dlss.dll (project/rfom_dlss.cpp) + nvngx_dlss.dll beside the exe; if either
+ * is missing or the GPU can't run DLSS it falls back to FSR 3.1.
+ * RSX_DLSS_PRESET=<n>: NGX render preset (0 = NVIDIA default, 11 = K, 10 = J).
+ * RSX_DLSS_JITTER_SIGN=-1: negate the jitter passed to DLSS (diagnostic).
  * =========================================================================*/
 #include "ffx/ffx_api.h"
 #include "ffx/ffx_api_types.h"
@@ -52,8 +59,26 @@ int fsr_mode(void)
 {
     static int m = -1;
     if (m < 0) { const char* e = getenv("RSX_FSR"); m = e ? atoi(e) : 0; if (m < 0) m = 0;
-                 if (m) fprintf(stderr, "[FSR] requested (mode %d: native AA)%c", m, 10); }
+                 if (m) fprintf(stderr, "[FSR] requested (mode %d: native AA%s)%c", m, m == 2 ? ", NVIDIA DLAA" : "", 10); }
     return m;
+}
+/* Upscaling (RSX_UPSCALE=<0.33..1>, FSR or DLSS): the scene draws go into the
+ * top-left render_w x render_h corner of the scene surface and its depth (viewport
+ * scaled, nothing reallocated), the upscaler reads that corner and writes the
+ * full-size result, which replaces the whole surface before the post / HUD passes
+ * read it. Screen-position (WPOS) lookups made during the scene stay inside the
+ * corner because WPOS is still divided by the normal resolution scale. */
+static volatile float g_up_frac = 1.0f;   /* share of the surface the scene renders to (1 = native AA) */
+static float up_cfg(void)
+{
+    static float v = -1.0f;
+    if (v < 0.0f) {
+        const char* e = getenv("RSX_UPSCALE");
+        v = e ? (float)atof(e) : 1.0f;
+        if (!(v > 0.0f) || v > 1.0f) v = 1.0f;
+        if (v < 0.33f) v = 0.33f;
+    }
+    return v;
 }
 static volatile LONG g_fsr_live;          /* render thread has a context: record side jitters */
 static volatile u32  g_fsr_scene_off;     /* render thread's pick of the scene colour surface */
@@ -69,7 +94,10 @@ static void fsr_jitter(u32 frame, float* jx, float* jy)
 {
     static int jon = -1; if (jon < 0) { const char* e = getenv("RSX_FSR_JITTER"); jon = e ? atoi(e) : 1; }
     if (!jon || s_fsr_ab >= 2) { *jx = *jy = 0.0f; return; }   /* 4 too */   /* v184 diag: RSX_FSR_JITTER=0 / Home modes 2,3 */
-    const u32 i = (frame % 8u) + 1u;
+    /* 8 phases at 1x, 8 x (output/render)^2 when upscaling (NVIDIA's guidance) */
+    const float f = g_up_frac;
+    u32 ph = (u32)(8.0f / (f * f) + 0.5f); if (ph < 8u) ph = 8u; if (ph > 72u) ph = 72u;
+    const u32 i = (frame % ph) + 1u;
     *jx = fsr_halton(i, 2u) - 0.5f;
     *jy = fsr_halton(i, 3u) - 0.5f;
 }
@@ -151,11 +179,13 @@ static volatile u32 s_fsr_disp_frame; static volatile ULONGLONG s_fsr_disp_ms;  
 static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* csrc, const float* epi)
 {
     if (!dr) return;
-    dr->fsr = 0;
+    dr->fsr = 0; dr->fsr_up = 0.0f;
     if (!g_fsr_live || !dr->rt_off || dr->rt_off != g_fsr_scene_off) return;
     if (!fsr_hist_init()) return;
     s_fsr_st_rec++;
     const u32 fr = s_fsr_rec_frame;
+    const float uf = g_up_frac;   /* one value per draw: jitter scale and viewport agree */
+    dr->fsr_up = uf; dr->fsr_frame = fr;
     if (fr != s_fsr_tab_frame) {
         /* v184: don't overwrite history the GPU may still read. The previous
          * frame's batch is already with the render thread here, so this only
@@ -174,7 +204,7 @@ static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* c
          * own light passes and shakes against the rest. No motion for it. */
         s_fsr_st_over++;
         float jx, jy; fsr_jitter(fr, &jx, &jy);
-        const float nx = 2.0f * jx / (float)SC(s_d3d.width), ny = -2.0f * jy / (float)SC(s_d3d.height);
+        const float nx = 2.0f * jx / ((float)SC(s_d3d.width) * uf), ny = -2.0f * jy / ((float)SC(s_d3d.height) * uf);
         float* vpx = (float*)(dst + 8192);
         vpx[4] = epi[4] + nx; vpx[5] = epi[5] + ny;
         return;
@@ -309,7 +339,7 @@ static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* c
     }
 
     float jx, jy; fsr_jitter(fr, &jx, &jy);
-    const float nx = 2.0f * jx / (float)SC(s_d3d.width), ny = -2.0f * jy / (float)SC(s_d3d.height);
+    const float nx = 2.0f * jx / ((float)SC(s_d3d.width) * uf), ny = -2.0f * jy / ((float)SC(s_d3d.height) * uf);
     float* vpx = (float*)(dst + 8192);
     vpx[4] = epi[4] + nx; vpx[5] = epi[5] + ny;   /* v181: write only (dst is write-combined) */
     dr->fsr = 1; dr->fsr_frame = fr; dr->fsr_prev = (u32)prev_off; dr->fsr_jnx = nx; dr->fsr_jny = ny;
@@ -341,6 +371,45 @@ static u32 s_fsr_last_frame;         /* last frame dispatched (reset on disconti
 static u32 s_fsr_cnt[MAX_OFF_RTS];   /* scene pick: display-sized draws per slot this frame */
 static LARGE_INTEGER s_fsr_t_last;
 
+/* ---- NVIDIA DLAA through rfom_dlss.dll (RSX_FSR=2) ---- */
+typedef void (*RfomDlssLog)(const char*);
+static HMODULE s_dlss_dll; static int s_dlss_fail, s_dlss_on, s_dlss_need, s_dlss_bad;
+static u32 s_dlss_rw, s_dlss_rh;     /* render size the DLSS feature was made for */
+static float s_fsr_up_r;             /* render thread: upscale share of the scene being built */
+static int  (*p_dlss_init)(ID3D12Device*, const wchar_t*, RfomDlssLog);
+static int  (*p_dlss_create)(ID3D12GraphicsCommandList*, unsigned, unsigned, unsigned, unsigned, int, unsigned);
+static int  (*p_dlss_eval)(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*,
+                           float, float, float, float, int, float);
+static void (*p_dlss_release)(void);
+static void dlss_log(const char* m) { fprintf(stderr, "[DLSS] %s%c", m, 10); }
+static int dlss_load(void)
+{
+    if (s_dlss_fail) return 0;
+    if (s_dlss_dll) return 1;
+    wchar_t dir[MAX_PATH]; DWORD n = GetModuleFileNameW(NULL, dir, MAX_PATH);
+    while (n && dir[n - 1] != L'\\' && dir[n - 1] != L'/') n--;
+    dir[n ? n - 1 : 0] = 0;
+    HMODULE m = LoadLibraryA("rfom_dlss.dll");
+    if (m) {
+        p_dlss_init    = (int (*)(ID3D12Device*, const wchar_t*, RfomDlssLog))(void*)GetProcAddress(m, "rfom_dlss_init");
+        p_dlss_create  = (int (*)(ID3D12GraphicsCommandList*, unsigned, unsigned, unsigned, unsigned, int, unsigned))(void*)GetProcAddress(m, "rfom_dlss_create");
+        p_dlss_eval    = (int (*)(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*,
+                                  float, float, float, float, int, float))(void*)GetProcAddress(m, "rfom_dlss_eval");
+        p_dlss_release = (void (*)(void))(void*)GetProcAddress(m, "rfom_dlss_release");
+    }
+    if (!m || !p_dlss_init || !p_dlss_create || !p_dlss_eval || !p_dlss_release) {
+        fprintf(stderr, "[DLSS] rfom_dlss.dll not found next to the exe (or incomplete) -- using FSR 3.1%c", 10);
+        s_dlss_fail = 1; return 0;
+    }
+    if (!p_dlss_init(s_d3d.device, dir, dlss_log)) {
+        fprintf(stderr, "[DLSS] NGX unavailable (non-NVIDIA GPU, old driver or no nvngx_dlss.dll) -- using FSR 3.1%c", 10);
+        s_dlss_fail = 1; return 0;
+    }
+    s_dlss_dll = m;
+    fprintf(stderr, "[DLSS] NGX initialised%c", 10);
+    return 1;
+}
+static int fsr_live(void) { return s_fsr_ctx != NULL || s_dlss_on; }
 static void fsr_msg(uint32_t type, const wchar_t* msg)
 {
     static int n = 0; if (n++ > 60) return;
@@ -384,6 +453,8 @@ static void fsr_release(void)
 {
     if (s_fsr_ctx && p_ffxDestroyContext) { wait_for_gpu(); p_ffxDestroyContext(&s_fsr_ctx, NULL); }
     s_fsr_ctx = NULL;
+    if (s_dlss_on) { wait_for_gpu(); p_dlss_release(); s_dlss_on = 0; }
+    s_dlss_rw = s_dlss_rh = 0;
     if (s_fsr_mv)  { grave_defer(s_fsr_mv);  s_fsr_mv = NULL; }
     if (s_fsr_z)   { grave_defer(s_fsr_z);   s_fsr_z = NULL; }
     if (s_fsr_rx)  { grave_defer(s_fsr_rx);  s_fsr_rx = NULL; }
@@ -393,9 +464,11 @@ static void fsr_release(void)
 /* Context + targets for a w x h scene (render = display: native AA). */
 static int fsr_ensure(u32 w, u32 h, DXGI_FORMAT colour_fmt)
 {
-    if (!fsr_mode() || s_ffx_dll_fail || s_fsr_ctx_fail) return 0;
-    if (s_fsr_ctx && s_fsr_cw == w && s_fsr_ch == h) return 1;
-    if (!s_ffx_dll) {
+    if (!fsr_mode()) return 0;
+    if (fsr_live() && s_fsr_cw == w && s_fsr_ch == h) return 1;
+    const int use_dlss = fsr_mode() == 2 && !s_dlss_bad && dlss_load();
+    if (!use_dlss && (s_ffx_dll_fail || s_fsr_ctx_fail)) return 0;
+    if (!use_dlss && !s_ffx_dll) {
         s_ffx_dll = LoadLibraryA("amd_fidelityfx_loader_dx12.dll");
         if (s_ffx_dll) {
             p_ffxCreateContext  = (PfnFfxCreateContext)(void*)GetProcAddress(s_ffx_dll, "ffxCreateContext");
@@ -410,6 +483,9 @@ static int fsr_ensure(u32 w, u32 h, DXGI_FORMAT colour_fmt)
         }
     }
     fsr_release();
+    if (use_dlss) {
+        s_dlss_on = 1; s_dlss_need = 1;   /* feature is created on the next dispatch's command list */
+    } else {
     struct ffxCreateBackendDX12Desc be; memset(&be, 0, sizeof be);
     be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12; be.device = s_d3d.device;
     struct ffxCreateContextDescUpscale cd; memset(&cd, 0, sizeof cd);
@@ -436,6 +512,7 @@ static int fsr_ensure(u32 w, u32 h, DXGI_FORMAT colour_fmt)
         if (p_ffxQuery(&s_fsr_ctx, &pv.header) == FFX_API_RETURN_OK && pv.versionName)
             fprintf(stderr, "[FSR] upscaler provider: %s%c", pv.versionName, 10);
     }
+    }
     if (!s_fsr_rtv_heap) {
         D3D12_DESCRIPTOR_HEAP_DESC hd = {0}; hd.NumDescriptors = 3; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         s_d3d.device->lpVtbl->CreateDescriptorHeap(s_d3d.device, &hd, &IID_ID3D12DescriptorHeap, (void**)&s_fsr_rtv_heap);
@@ -449,14 +526,14 @@ static int fsr_ensure(u32 w, u32 h, DXGI_FORMAT colour_fmt)
     s_fsr_mv_st = s_fsr_z_st = D3D12_RESOURCE_STATE_RENDER_TARGET; s_fsr_out_st = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     if (!s_fsr_rtv_heap || !s_fsr_mv || !s_fsr_z || !s_fsr_rx || !s_fsr_out) {
         fprintf(stderr, "[FSR] target allocation failed -- FSR off%c", 10);
-        fsr_release(); s_fsr_ctx_fail = 1; return 0;
+        fsr_release(); s_fsr_ctx_fail = 1; s_dlss_bad = 1; return 0;
     }
     s_d3d.device->lpVtbl->CreateRenderTargetView(s_d3d.device, s_fsr_mv, NULL, fsr_rtv(0));
     s_d3d.device->lpVtbl->CreateRenderTargetView(s_d3d.device, s_fsr_z, NULL, fsr_rtv(1));
     s_d3d.device->lpVtbl->CreateRenderTargetView(s_d3d.device, s_fsr_rx, NULL, fsr_rtv(2));
     s_fsr_cw = w; s_fsr_ch = h;
     s_fsr_last_frame = 0;
-    fprintf(stderr, "[FSR] native AA at %ux%u%c", w, h, 10);
+    fprintf(stderr, "[FSR] native AA at %ux%u%s%c", w, h, s_dlss_on ? " (NVIDIA DLAA)" : "", 10);
     return 1;
 }
 
@@ -706,7 +783,7 @@ static ID3D12PipelineState* mv_get_pso(const D3D12DrawRecord* dr, int rx)
  * GPU-fetch SRV are restored. */
 static void fsr_mv_replay(u32 d0, u32 d1, D3D12_CPU_DESCRIPTOR_HANDLE dsv, int rtslot)
 {
-    if (rtslot < 0 || !s_fsr_ctx || !mv_init()) return;
+    if (rtslot < 0 || !fsr_live() || !mv_init()) return;
     const OffRT* rt = &s_d3d.off_rt[rtslot];
     if (SC(rt->w) != s_fsr_cw || SC(rt->h) != s_fsr_ch) return;
     ID3D12GraphicsCommandList* cl = s_d3d.cmd_list;
@@ -770,6 +847,8 @@ static void fsr_mv_replay(u32 d0, u32 d1, D3D12_CPU_DESCRIPTOR_HANDLE dsv, int r
         if (dr->vp_w >= 2 && dr->vp_h >= 2 && (float)(dr->vp_x + dr->vp_w) <= tw + 0.5f && (float)(dr->vp_y + dr->vp_h) <= th + 0.5f) {
             vp.TopLeftX = (float)dr->vp_x; vp.TopLeftY = (float)dr->vp_y; vp.Width = (float)dr->vp_w; vp.Height = (float)dr->vp_h; }
         vp.TopLeftX = SCF(vp.TopLeftX); vp.TopLeftY = SCF(vp.TopLeftY); vp.Width = SCF(vp.Width); vp.Height = SCF(vp.Height);
+        if (dr->fsr_up > 0.0f && dr->fsr_up < 1.0f) {   /* DLSS upscaling: same corner as the colour draw */
+            const float u = dr->fsr_up; vp.TopLeftX *= u; vp.TopLeftY *= u; vp.Width *= u; vp.Height *= u; }
         D3D12_RECT sc = {(LONG)(vp.TopLeftX + 0.5f), (LONG)(vp.TopLeftY + 0.5f), (LONG)(vp.TopLeftX + vp.Width + 0.5f), (LONG)(vp.TopLeftY + vp.Height + 0.5f)};
         cl->lpVtbl->RSSetViewports(cl, 1, &vp);
         cl->lpVtbl->RSSetScissorRects(cl, 1, &sc);
@@ -930,10 +1009,12 @@ static void fsr_dispatch(void)
     }
     const int slot = s_fsr_slot;
     s_fsr_done = 1;
-    if (slot < 0 || !s_fsr_ctx || !s_fsr_mv_started) return;
+    if (slot < 0 || !fsr_live() || !s_fsr_mv_started) return;
     OffRT* rt = &s_d3d.off_rt[slot];
     const u32 w = SC(rt->w), h = SC(rt->h);
     if (w != s_fsr_cw || h != s_fsr_ch || !rt->res) return;
+    const float uf = (s_fsr_up_r > 0.0f && s_fsr_up_r < 1.0f) ? s_fsr_up_r : 1.0f;
+    const u32 rw = uf < 1.0f ? (u32)((float)w * uf + 0.5f) : w, rh = uf < 1.0f ? (u32)((float)h * uf + 0.5f) : h;
     ID3D12GraphicsCommandList* cl = s_d3d.cmd_list;
     const D3D12_RESOURCE_STATES rd = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     off_rt_transition(slot, rd);
@@ -953,8 +1034,8 @@ static void fsr_dispatch(void)
     dd.output = fsr_res(s_fsr_out, (DXGI_FORMAT)rt->dxgi, w, h, FFX_API_RESOURCE_USAGE_UAV, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     float jx, jy; fsr_jitter(s_fsr_frame_r, &jx, &jy);
     dd.jitterOffset.x = jx; dd.jitterOffset.y = jy;
-    dd.motionVectorScale.x = (float)w; dd.motionVectorScale.y = (float)h;
-    dd.renderSize.width = w; dd.renderSize.height = h;
+    dd.motionVectorScale.x = (float)rw; dd.motionVectorScale.y = (float)rh;
+    dd.renderSize.width = rw; dd.renderSize.height = rh;
     dd.upscaleSize.width = w; dd.upscaleSize.height = h;
     { static float sh = -1.0f; if (sh < 0.0f) { const char* e = getenv("RSX_FSR_SHARP"); sh = e ? (float)atof(e) : 0.25f;
                                                 if (sh < 0.0f) sh = 0.0f; if (sh > 1.0f) sh = 1.0f; }
@@ -977,6 +1058,24 @@ static void fsr_dispatch(void)
         off_rt_transition(slot, D3D12_RESOURCE_STATE_COPY_SOURCE);
         fsr_barrier(s_fsr_out, &s_fsr_out_st, D3D12_RESOURCE_STATE_COPY_DEST);
         cl->lpVtbl->CopyResource(cl, s_fsr_out, rt->res);
+    } else if (s_dlss_on) {
+        if (s_dlss_on && (s_dlss_rw != rw || s_dlss_rh != rh)) s_dlss_need = 1;   /* render size changed: new feature */
+        if (s_dlss_need) {
+            static int pr = -2; if (pr == -2) { const char* e = getenv("RSX_DLSS_PRESET"); pr = e ? atoi(e) : 0; if (pr < 0) pr = 0; }
+            s_dlss_need = 0;
+            if (s_dlss_rw) wait_for_gpu();   /* the old feature may still be in flight */
+            s_dlss_rw = rw; s_dlss_rh = rh;
+            if (!p_dlss_create(cl, rw, rh, w, h, 0, (unsigned)pr)) {
+                fprintf(stderr, "[DLSS] feature creation failed -- switching to FSR 3.1%c", 10);
+                s_dlss_bad = 1; s_dlss_on = 0; fsr_release();   /* fsr_ensure makes an FSR context next frame */
+                rc = FFX_API_RETURN_ERROR;
+            }
+        }
+        if (s_dlss_on) {
+            static float js = 0.0f; if (js == 0.0f) { const char* e = getenv("RSX_DLSS_JITTER_SIGN"); js = (e && atoi(e) < 0) ? -1.0f : 1.0f; }
+            if (!p_dlss_eval(cl, rt->res, s_fsr_z, s_fsr_mv, s_fsr_out, js * jx, js * jy, (float)rw, (float)rh, dd.reset, dt))
+                rc = FFX_API_RETURN_ERROR;
+        }
     } else rc = p_ffxDispatch(&s_fsr_ctx, &dd.header);
     /* FFX bound its own descriptor heap / compute state. */
     { ID3D12DescriptorHeap* heaps[] = { s_d3d.srv_heap };
@@ -1014,6 +1113,7 @@ static void fsr_note_scene_draw(const D3D12DrawRecord* dr, int slot)
         s_fsr_frame_r = dr->fsr_frame;
         s_fsr_mv_started = 0; s_fsr_done = 0;
     }
+    s_fsr_up_r = dr->fsr_up;
     s_fsr_slot = slot;
 }
 /* Render thread, end of a presented frame: pick next frame's scene surface. */
@@ -1032,6 +1132,10 @@ static void fsr_frame_end(void)
                 fprintf(stderr, "[FSR] scene surface 0x%08X (%ux%u, %u draws)%c", r->off, r->w, r->h, bn, 10);
                 g_fsr_scene_off = r->off;
             }
+            { const float u = up_cfg();
+              if (u != g_up_frac) { g_up_frac = u;
+                  fprintf(stderr, "[FSR] render resolution %.0f%% of output (%ux%u -> %ux%u)%c", u * 100.0f,
+                          (u32)(SC(r->w) * u + 0.5f), (u32)(SC(r->h) * u + 0.5f), SC(r->w), SC(r->h), 10); } }
             InterlockedExchange(&g_fsr_live, 1);
             return;
         }

@@ -387,6 +387,7 @@ typedef struct {
     u32   stencil_ref;  /* v178: front stencil reference (dynamic; the rest of the stencil state is in cull >> 24) */
     u32   fsr_frame, fsr_prev;
     float fsr_jnx, fsr_jny;
+    float fsr_up;   /* DLSS upscaling: share of the scene surface this jittered draw renders to (0 = not jittered) */
     u8 fsr_mt; u16 fsr_chain; float fsr_bd; u32 fsr_slot, fsr_pslot;   /* v184 diag: how the previous frame was matched */
     /* v189: NV3089 copy out of a GPU surface (is_clear record, clear_mask 0):
      * source surface offset and image size, start and step in source pixels. */
@@ -3298,7 +3299,7 @@ static int vsj_submit_job(const VsJob* jin)
     static volatile LONG started = 0;   /* VS jobs come from the FIFO thread, FP jobs from the render thread */
     if (InterlockedCompareExchange(&started, 1, 0) == 0) {
         SYSTEM_INFO si; GetSystemInfo(&si);
-        int n = (int)si.dwNumberOfProcessors / 4; if (n < 2) n = 2; if (n > 4) n = 4;
+        int n = (int)si.dwNumberOfProcessors / 2; if (n < 2) n = 2; if (n > 8) n = 8;
         { const char* e = getenv("RSX_VS_ASYNC_THREADS"); if (e && atoi(e) > 0) n = atoi(e); }
         for (int i = 0; i < n; i++) {
             HANDLE h = CreateThread(NULL, 1u << 20, vsj_worker, NULL, 0, NULL);
@@ -6419,7 +6420,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
     if (dr) ((D3D12DrawRecord*)dr)->stencil_ref = st->stencil_ref & 0xFFu;   /* v178 */
     /* v165: FSR -- history copy (un-jittered) + sub-pixel jitter for scene draws. */
     memcpy(dst + RSX_MAX_VERTEX_CONSTANTS * 16, vpx, sizeof vpx);
-    if (dr) { if (fsr_mode()) fsr_record((D3D12DrawRecord*)dr, vs_idx, dst, (const char*)st->vertex_constants, vpx); else ((D3D12DrawRecord*)dr)->fsr = 0; }
+    if (dr) { if (fsr_mode()) fsr_record((D3D12DrawRecord*)dr, vs_idx, dst, (const char*)st->vertex_constants, vpx); else { ((D3D12DrawRecord*)dr)->fsr = 0; ((D3D12DrawRecord*)dr)->fsr_up = 0.0f; } }
 }
 
 /* Which offscreen surface (if any) does the current RSX state render to?
@@ -9251,6 +9252,13 @@ static void render_frame_impl(void)
                     if (rs_scale() != 1.0f) {   /* v136: guest pixels -> render pixels */
                         dvp.TopLeftX = SCF(dvp.TopLeftX); dvp.TopLeftY = SCF(dvp.TopLeftY);
                         dvp.Width = SCF(dvp.Width);       dvp.Height = SCF(dvp.Height);
+                    }
+                    /* Upscaling (RSX_UPSCALE): jittered scene draws before this frame's
+                     * FSR/DLSS pass render into the top-left corner. */
+                    if (dr->fsr_up > 0.0f && dr->fsr_up < 1.0f && fsr_mode() &&
+                        !(s_fsr_done && dr->fsr_frame == s_fsr_frame_r)) {
+                        const float u = dr->fsr_up;
+                        dvp.TopLeftX *= u; dvp.TopLeftY *= u; dvp.Width *= u; dvp.Height *= u;
                     }
                     D3D12_RECT dsc = {(LONG)(dvp.TopLeftX + 0.5f), (LONG)(dvp.TopLeftY + 0.5f),
                                       (LONG)(dvp.TopLeftX + dvp.Width + 0.5f),

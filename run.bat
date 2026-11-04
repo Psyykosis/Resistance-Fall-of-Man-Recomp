@@ -21,5 +21,9 @@ rem your copy of the game (Setup.bat put it here)
 set "PS3_VFS_ROOT=%~dp0gamefiles"
 rem Launcher.exe writes settings.bat (display mode, frame limit, vsync, filtering, keys)
 if exist settings.bat call settings.bat
+rem shader cache backup (outside the game folder, so Setup/updates can't wipe it): restore missing files before, save new ones after
+set "SHC_BACKUP=%LOCALAPPDATA%\ResistancePort\shadercache"
+if exist "%SHC_BACKUP%" robocopy "%SHC_BACKUP%" shadercache /E /XO /XN /XC /R:0 /W:0 /NJH /NJS /NFL /NDL /NP >nul
 echo Running... (log: %~dp0logs\run.log). Close the game window to stop.
 build\ResistanceFoM.exe "%~dp0game\EBOOT.elf" 2>&1 | "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "$input | Tee-Object -FilePath logs\run.log"
+if exist shadercache robocopy shadercache "%SHC_BACKUP%" /E /XO /R:0 /W:0 /NJH /NJS /NFL /NDL /NP >nul

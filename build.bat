@@ -50,6 +50,16 @@ rem FFmpeg (video decode) is loaded at run time: Setup.bat puts the DLLs in tool
 for %%D in (build build_game) do for %%F in (avcodec-61.dll avutil-59.dll swresample-5.dll) do if exist "tools\ffmpeg_bin\%%F" copy /Y "tools\ffmpeg_bin\%%F" %%D\ >nul
 rem AMD FidelityFX (FSR 3.1, the anti-aliasing option): AMD's signed DLLs, MIT licence (tools\ffx_bin\LICENSE.txt)
 for %%D in (build build_game) do for %%F in (amd_fidelityfx_loader_dx12.dll amd_fidelityfx_upscaler_dx12.dll) do if exist "tools\ffx_bin\%%F" copy /Y "tools\ffx_bin\%%F" %%D\ >nul
+rem NVIDIA DLSS (the "NVIDIA DLSS" option): rfom_dlss.dll is the only binary linking the NGX SDK, which setup.ps1
+rem downloads into tools\dlss (NVIDIA RTX SDK licence in tools\dlss\LICENSE.txt); nvngx_dlss.dll is NVIDIA's redistributable.
+if exist "tools\dlss\lib\nvsdk_ngx_s.lib" (
+  clang-cl /nologo /O2 /EHsc /MT /LD /W0 /Itools\dlss\include project\rfom_dlss.cpp /Fo:build\rfom_dlss.obj /Fe:build\rfom_dlss.dll /link tools\dlss\lib\nvsdk_ngx_s.lib d3d12.lib advapi32.lib user32.lib > logs\build_dlss.log 2>&1
+  if errorlevel 1 (echo DLSS bridge build failed - see logs\build_dlss.log) else (
+    echo rfom_dlss.dll built
+    copy /Y build\rfom_dlss.dll build_game\ >nul
+    for %%D in (build build_game) do copy /Y "tools\dlss\nvngx_dlss.dll" %%D\ >nul
+  )
+)
 echo.
 echo BUILD SUCCEEDED: build\ResistanceFoM.exe and build_game\ResistanceFoMGame.exe
 echo Start the game with Launcher.exe

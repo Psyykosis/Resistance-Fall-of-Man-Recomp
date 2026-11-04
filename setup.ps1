@@ -167,6 +167,30 @@ if (-not (Test-Path (Join-Path $ffd 'avcodec-61.dll'))) {
     Get-ChildItem $tmp -Recurse -Include 'avcodec-61.dll', 'avutil-59.dll', 'swresample-5.dll' | Copy-Item -Destination $ffd
     if (-not (Test-Path (Join-Path $ffd 'avcodec-61.dll'))) { Fail "The FFmpeg download did not contain avcodec-61.dll." }
 }
+$dl = Join-Path $Port 'tools\dlss'
+if (-not (Test-Path (Join-Path $dl 'lib\nvsdk_ngx_s.lib')) -or -not (Test-Path (Join-Path $dl 'nvngx_dlss.dll'))) {
+    Info "Fetching the NVIDIA DLSS SDK v310.9.16 (optional: the NVIDIA DLSS / DLAA option)..."
+    $base = 'https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.16'
+    $hdrs = 'nvsdk_ngx.h','nvsdk_ngx_defs.h','nvsdk_ngx_defs_dlssd.h','nvsdk_ngx_defs_dlssg.h','nvsdk_ngx_defs_vk.h',
+            'nvsdk_ngx_helpers.h','nvsdk_ngx_helpers_cuda.h','nvsdk_ngx_helpers_d3d.h','nvsdk_ngx_helpers_dlssd.h',
+            'nvsdk_ngx_helpers_dlssd_cuda.h','nvsdk_ngx_helpers_dlssd_d3d.h','nvsdk_ngx_helpers_dlssd_vk.h',
+            'nvsdk_ngx_helpers_dlssg.h','nvsdk_ngx_helpers_dlssg_d3d.h','nvsdk_ngx_helpers_dlssg_vk.h','nvsdk_ngx_helpers_vk.h',
+            'nvsdk_ngx_loader.h','nvsdk_ngx_params.h','nvsdk_ngx_params_dlssd.h','nvsdk_ngx_params_dlssg.h',
+            'nvsdk_ngx_standalone_common.h','nvsdk_ngx_standalone_cuda.h','nvsdk_ngx_vk.h'
+    $files = @(@('LICENSE.txt', 'LICENSE.txt'),
+               @('lib/Windows_x86_64/x64/nvsdk_ngx_s.lib', 'lib\nvsdk_ngx_s.lib'),
+               @('lib/Windows_x86_64/rel/nvngx_dlss.dll', 'nvngx_dlss.dll')) + ($hdrs | ForEach-Object { ,@("include/$_", "include\$_") })
+    try {
+        foreach ($f in $files) {
+            $out = Join-Path $dl $f[1]
+            New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
+            Invoke-WebRequest -UseBasicParsing -Uri "$base/$($f[0])" -OutFile $out
+        }
+    } catch {
+        Info "Could not download the DLSS SDK - building without the NVIDIA DLSS option (FSR still works)."
+        if (Test-Path (Join-Path $dl 'lib')) { Remove-Item (Join-Path $dl 'lib') -Recurse -Force }
+    }
+}
 & cmd /c "`"$Port\build.bat`" nopause"
 if ($LASTEXITCODE -ne 0) { Fail "The build failed - see logs\build.log and logs\build_game.log." }
 

@@ -9,6 +9,7 @@
 /project/spu/jobmods_register.c
 /tools/key_vault.cpp
 /tools/ffmpeg_bin/
+/tools/dlss/
 /shadercache/
 
 # build output / runtime files

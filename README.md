@@ -64,12 +64,18 @@ If you hit a problem, let me know how to reproduce it and what it was, and if yo
 ## Some Plans
 
 - Revamping how the game runs in terms of windows, so that it doesn't open the CMD log window and doesn't reopen when loading into missions. The CMD is just for debugging and the reopen happens because on the PS3 disc the game is separated into two different programs, the main menu is one program and the level is another program, and on the PS3 when you load into a level from the main menu it opens that next program, the window is just the separate program. I plan on making them both load in one window and removing the CMD log.
-- Adding DLSS 5 into the launcher as an optional graphics setting. It may be possible to do yourself with Reshade, but Reshade itself is untested (will be tested eventually) and it may not be able to read the depth buffer properly, so feel free to try Reshade yourself and let me know how it turns out. It should be directed to build_game\ResistanceFoMGame.exe. DLSS 5 would be much more straightforward done through the launcher because it would work through the same pipeline as FSR 3.1, just swapping it out. I cannot test it myself because I do not have an Nvidia GPU at the moment.
+
+## DLSS and upscaling
+
+- **Anti-aliasing → NVIDIA DLAA (DLSS)** uses NVIDIA DLSS on GeForce RTX cards and falls back to FSR 3.1 on other GPUs. The DLSS SDK is downloaded by Setup into `tools\dlss` (if that fails, the port still builds without it).
+- **Upscaling** (with FSR or DLSS on): renders the 3D scene at 67 / 58 / 50 / 33 % and lets FSR / DLSS rebuild it at the render resolution. The DLSS preset (DLAA, Quality, Balanced, Performance, Ultra Performance) follows the chosen ratio. Menus and HUD stay at full resolution.
+- The shader cache is backed up to `%LOCALAPPDATA%\ResistancePort\shadercache` after each session and restored before launch, so reinstalling or updating doesn't bring back first-visit shader stutter.
 
 ## Credits and licences
 
 - ps3recomp, by Ned Heller / sp00nznet: MIT.
 - AMD FidelityFX SDK (FSR 3.1), the DLLs in `tools/ffx_bin/`: MIT, © Advanced Micro Devices.
+- NVIDIA DLSS SDK v310.9.16, downloaded during setup into `tools/dlss/`: NVIDIA RTX SDK licence (`tools/dlss/LICENSE.txt`), not part of this repository.
 - FFmpeg 7.1.1 (gyan.dev build), downloaded during setup for the game's videos: GPL/LGPL, not part of this repository.
 - RPCS3 (`key_vault.cpp`), downloaded during setup and used only to decrypt your own copy.
 - The port's own code: MIT, see `LICENSE`.
