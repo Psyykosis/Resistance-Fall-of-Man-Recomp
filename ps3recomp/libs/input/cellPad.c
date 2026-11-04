@@ -342,6 +342,15 @@ volatile int g_rfom_kbm_interact_bound = 0;   /* controls.txt binds INTERACT */
 volatile int g_rfom_input_kbm = 0;            /* port 0 is the keyboard (no controller) */
 volatile u16 g_rfom_pad_btns0 = 0;            /* controller port 0 buttons (CELL_PAD_CTRL_*) */
 volatile u16 g_rfom_pad_interact = 0;         /* controller interact button, 0 = as on PS3 */
+/* Cutscene skip. A press of skip_cutscene_key (keyboard, default ENTER) or
+ * pad_skip_cutscene (controller button, default NONE) raises this request;
+ * runtime/ppu/ppu_fs.cpp then ends the cutscene movie that is playing by
+ * reporting end-of-file on it, so the game finishes the movie as if it had
+ * played to the end. It is cleared whenever a cutscene movie is opened, so a
+ * press outside a cutscene never skips the next one. */
+volatile long g_rfom_movie_skip_req = 0;
+static int s_skip_vk = VK_RETURN;
+static volatile u16 s_pad_skip_btn = 0;
 static void ctl_extra_load(void)
 {
     /* One-time migration of an older controls.txt: what was "Action / melee"
@@ -360,6 +369,10 @@ static void ctl_extra_load(void)
                 if (!_stricmp(k, "V")) v_used = 1;
                 if (!_stricmp(k, "pad_interact")) {
                     u16 b = 0; g_rfom_pad_interact = (kbm_action(v, &b) == KA_BTN) ? b : 0; }
+                if (!_stricmp(k, "pad_skip_cutscene")) {
+                    u16 b = 0; s_pad_skip_btn = (kbm_action(v, &b) == KA_BTN) ? b : 0; }
+                if (!_stricmp(k, "skip_cutscene_key")) {
+                    s_skip_vk = _stricmp(v, "NONE") ? kbm_key(v) : 0; }
             } }
         n++;
     }
@@ -409,6 +422,8 @@ static void kbm_load(void)
         if (!_stricmp(k, "mouse_look"))        { g_ml_mode = _stricmp(v, "stick") ? 1 : 0; continue; }
         if (!_stricmp(k, "mouse_degrees_per_count")) { s_ml_deg = atof(v); continue; }
         if (!_stricmp(k, "pad_interact")) continue;               /* ctl_extra_load */
+        if (!_stricmp(k, "pad_skip_cutscene")) continue;          /* ctl_extra_load */
+        if (!_stricmp(k, "skip_cutscene_key")) continue;          /* ctl_extra_load */
         if (!_stricmp(k, "menu_mouse"))       { s_menu_mouse = atoi(v); continue; }
         if (!_stricmp(k, "menu_mouse_step"))  { s_menu_step = atol(v); continue; }
         int vk = kbm_key(k); u16 btn = 0; int act = kbm_action(v, &btn);
@@ -1006,6 +1021,15 @@ static void pad_poll_backend(void)
     if (!s_host_state[0].connected) g_rfom_pad_btns0 = 0;
     g_rfom_input_kbm = !s_host_state[0].connected;
     if (!s_host_state[0].connected) pad_poll_keyboard();
+    /* Cutscene skip (edge-triggered): the keyboard key works with or without a
+     * controller plugged in, but only while the game window has focus. */
+    { static int was = 0;
+      int down = 0;
+      if (s_skip_vk && pad_host_window_focused() && s_skip_vk < 0x1000)
+          down = (GetAsyncKeyState(s_skip_vk) & 0x8000) != 0;
+      if (s_pad_skip_btn && s_host_state[0].connected && (g_rfom_pad_btns0 & s_pad_skip_btn)) down = 1;
+      if (down && !was) InterlockedExchange(&g_rfom_movie_skip_req, 1);
+      was = down; }
 #endif
 }
 
@@ -1068,6 +1092,10 @@ void cellPad_poll(void)
  * parameter, which conflicts with the header now that it is included. */
 
 volatile u32 g_pad_data_ea0 = 0;   /* v147: guest address of port 0's last GetData buffer (pad watch) */
+/* Resistance port: cutscene skip (runtime/ppu/ppu_fs.cpp). Weak so builds
+ * without that file still link. */
+__attribute__((weak)) void rfom_movie_skip_poll(void) {}
+
 s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
 {
     if (port_no == 0 && data_guest) g_pad_data_ea0 = (u32)(uintptr_t)data_guest;
@@ -1085,6 +1113,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
 
     /* Poll fresh state */
     pad_poll_backend();
+    if (port_no == 0) rfom_movie_skip_poll();
 
     /* YDKJ_INJECT_PAD: the game's wait loop polls the pad (cellPadSetActDirect /
      * GetData) -- if it's parked on a "press button" prompt after loading, no

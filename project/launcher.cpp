@@ -188,6 +188,7 @@ static const int NSHOW = 2;
 static std::string g_bind[NACT][NSLOT];
 static double g_msens = 1.0; static int g_minv = 0, g_mdirect = 1;
 static std::string g_mrelease = "F8";
+static std::string g_skipkey = "ENTER", g_padskip = "NONE";   // cutscene skip (kept as text, no widget yet)
 static double g_mdeg = 0.05, g_mdz = 0.28, g_msmooth = 0.03;
 static const char* g_padint_opts[][2] = {
     {"NONE","Same as Melee  (as on PS3)"},{"SQUARE","Square"},{"CIRCLE","Circle"},{"CROSS","Cross"},
@@ -232,7 +233,7 @@ static void ctl_defaults()
 {
     for (auto& r : g_bind) for (auto& k : r) k.clear();
     for (auto& d : g_default_binds) { int a = act_of(d[1]); if (a >= 0) bind_add(a, d[0]); }
-    g_msens = 1.0; g_minv = 0; g_mdirect = 1; g_mrelease = "F8"; g_mdeg = 0.05; g_mdz = 0.28; g_msmooth = 0.03;
+    g_msens = 1.0; g_minv = 0; g_mdirect = 1; g_mrelease = "F8"; g_skipkey = "ENTER"; g_padskip = "NONE"; g_mdeg = 0.05; g_mdz = 0.28; g_msmooth = 0.03;
     g_padint = 0;
 }
 static void ctl_load()
@@ -251,6 +252,8 @@ static void ctl_load()
         if (!_stricmp(k, "mouse_invert_y")) { g_minv = atoi(v); continue; }
         if (!_stricmp(k, "mouse_look")) { g_mdirect = _stricmp(v, "stick") ? 1 : 0; continue; }
         if (!_stricmp(k, "mouse_release_key")) { g_mrelease = v; continue; }
+        if (!_stricmp(k, "skip_cutscene_key")) { g_skipkey = v; continue; }
+        if (!_stricmp(k, "pad_skip_cutscene")) { g_padskip = v; continue; }
         if (!_stricmp(k, "mouse_degrees_per_count")) { g_mdeg = atof(v); continue; }
         if (!_stricmp(k, "mouse_deadzone")) { g_mdz = atof(v); continue; }
         if (!_stricmp(k, "mouse_smoothing")) { g_msmooth = atof(v); continue; }
@@ -301,9 +304,11 @@ static bool ctl_save()
     fprintf(f, "mouse_deadzone = %.2f      # stick emulation only\n", g_mdz);
     fprintf(f, "mouse_smoothing = %.2f     # stick emulation only, seconds\n", g_msmooth);
     fprintf(f, "mouse_release_key = %s     # free / recapture the mouse cursor\n", g_mrelease.c_str());
+    fprintf(f, "skip_cutscene_key = %s     # skip the cutscene movie that is playing; NONE = off\n", g_skipkey.c_str());
     fprintf(f, "\n# Controller\n");
     fprintf(f, "pad_interact = %s     # button that uses things (the game's Action button then only melees); NONE = as on PS3\n",
             g_padint_opts[g_padint][0]);
+    fprintf(f, "pad_skip_cutscene = %s     # controller button that skips a cutscene (e.g. START); NONE = off\n", g_padskip.c_str());
     fclose(f);
     return true;
 }
