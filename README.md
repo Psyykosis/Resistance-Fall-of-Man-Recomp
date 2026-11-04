@@ -35,6 +35,8 @@ You only need to run Setup again after downloading a newer version of the port, 
 
 This does have keyboard and mouse support. It should be hotswappable but I haven't tested it with controller myself as I don't use controller. Button prompts should show keys for keyboard and should switch back for controller, and certain things I didn't like like how the melee and interact button were the same button on PS3 have been separated into separate keys. You can configure keyboard and mouse controls in the launcher.
 
+Story cutscenes can be skipped with **Enter**. The key is `skip_cutscene_key` in `controls.txt`; to skip with a controller button too, set `pad_skip_cutscene` (for example `pad_skip_cutscene = SELECT`). The main menu's looping background videos are not affected.
+
 ## Status
 
 This is a work in progress, tested on a single PC. The campaign has been played from the start through Grimsby; I haven't gone any further than Grimsby on this version so it's no man's land as I said:

@@ -27,6 +27,9 @@ static PPU_TLS int     s_exit_armed = 0;
 #include <stdio.h>
 #include <stdlib.h>   /* getenv (else return value truncated to int on x64) */
 #include "ps3emu/log_first.h"
+
+/* Resistance port: see sys_ppu_thread_create. */
+volatile uint32_t g_rfom_movie_source = 0;
 #ifndef _WIN32
 #include <errno.h>
 #endif
@@ -444,6 +447,10 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
         *out = be_id;
     }
 
+    /* Resistance port (cutscene skip): the movie player's file source is the
+     * root of its pipeline; its thread's argument is that object. ppu_fs.cpp
+     * calls its own Stop method when the skip key is pressed. */
+    if (!strcmp(t->name, "MoviePlayerSourceFile")) g_rfom_movie_source = (uint32_t)arg;
     fprintf(stderr, "[SYS] sys_ppu_thread_create tid=%llu name=\"%s\" entry=0x%08llX arg=0x%llX stack=0x%X prio=%d flags=0x%llX\n",
             (unsigned long long)thread_id, t->name, (unsigned long long)entry, (unsigned long long)arg,
             stack_size, priority, (unsigned long long)flags);

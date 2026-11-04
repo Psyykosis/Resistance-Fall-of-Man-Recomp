@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <atomic>
+#include <chrono>
 #include <sys/stat.h>
 #include "../platform/win32_dirent.h"   /* <dirent.h>, or a Win32 stand-in */
 
@@ -211,6 +212,85 @@ static char    g_fd_path[FS_MAX][192];   /* guest path per fd (diagnostics) */  
 static DIR*  g_dirs[FS_MAX];
 static char  g_dir_path[FS_MAX][1024];   /* host path per open dir (for readdir stat) */
 
+/* Resistance port: skippable cutscenes. Story movies (the .avi files under movies/,
+ * except the menu's looping backgrounds "_lp") are marked on open.
+ *
+ * The game's movie player is a pipeline of components (file source -> ring
+ * buffer -> demuxer -> audio/video display), rooted at the file source
+ * (MoviePlayerSourceFile). Each component has a Stop method (vtable +0x4C;
+ * game.elf func_005EBA20 for the source) that flags it and its children to
+ * stop -- the same call the player's controller makes to end a movie early
+ * (func_005E6A6C, used by its destructors). When the skip key is pressed
+ * (cellPad.c raises g_rfom_movie_skip_req), the next read of the movie calls
+ * that Stop on the source, so the player winds down the way the game's own
+ * stop does.
+ *
+ * What did not work (file-level tricks, all froze): ending the file early,
+ * JUNK padding, splicing in or relabelling to the 'idx1' index, rewriting
+ * index entries.
+ * RFOM_NO_MOVIE_SKIP=1 turns it off. */
+extern "C" uint64_t ppu_guest_call(uint32_t opd, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                                   uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7);
+extern "C" volatile long g_rfom_movie_skip_req;
+extern "C" volatile uint32_t g_rfom_movie_source;   /* sys_ppu_thread.c */
+static uint8_t g_fd_movie[FS_MAX];   /* 1 = skippable cutscene, 2 = stopped */
+static std::chrono::steady_clock::time_point g_fd_movie_t0[FS_MAX];   /* when it was opened */
+
+/* Call the movie source's own Stop. Returns 0 when the object does not look
+ * like a movie source (nothing is called then). */
+static int movie_stop_source(char* why, size_t why_n)
+{
+    const uint32_t obj = g_rfom_movie_source;
+    const uint32_t lim = ppu_vm_size ? ppu_vm_size : 0xFFFFFFFFu;   /* 0 = no bound set */
+    if (!obj || obj >= lim) { snprintf(why, why_n, "no movie source seen"); return 0; }
+    const uint32_t vt = vm_read32(obj);
+    if (vt < 0x10000u || vt >= lim) { snprintf(why, why_n, "source 0x%08X has no vtable (0x%08X)", obj, vt); return 0; }
+    const uint32_t opd = vm_read32(vt + 0x4C);
+    const uint32_t code = (opd && opd < lim) ? vm_read32(opd) : 0;
+    if (!code || code >= 0x01000000u) { snprintf(why, why_n, "source 0x%08X vtable 0x%08X: bad Stop OPD 0x%08X", obj, vt, opd); return 0; }
+    const uint64_t r = ppu_guest_call(opd, obj, 0, 0, 0, 0, 0, 0, 0);
+    snprintf(why, why_n, "called Stop 0x%08X on source 0x%08X -> %lld", code, obj, (long long)(int32_t)r);
+    return 1;
+}
+/* Called from cellPadGetData, i.e. on a game thread outside the movie
+ * pipeline (the main thread polls the pad every frame, which is also where
+ * the game's own menu stops its movies). Calling Stop from the pipeline's own
+ * file-source thread deadlocks: the ring buffer holds its lock while it waits
+ * for that thread. RFOM_MOVIE_AUTOSKIP_MS=<ms> (testing): skip every
+ * skippable movie that long after it opened, as if the key had been pressed. */
+extern "C" void rfom_movie_skip_poll(void)
+{
+    static long long s_autoskip_ms = -2;
+    if (s_autoskip_ms == -2) { const char* e = getenv("RFOM_MOVIE_AUTOSKIP_MS"); s_autoskip_ms = e ? atoll(e) : -1; }
+    for (int fd = 3; fd < FS_MAX; fd++) {
+        if (g_fd_movie[fd] != 1 || !g_files[fd]) continue;
+        if (s_autoskip_ms >= 0 &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_fd_movie_t0[fd]).count() >= s_autoskip_ms)
+            g_rfom_movie_skip_req = 1;
+        if (!g_rfom_movie_skip_req) return;
+        if (!g_rfom_movie_source) return;   /* its player is not built yet: keep the request */
+        g_rfom_movie_skip_req = 0;
+        g_fd_movie[fd] = 2;   /* once per movie */
+        char why[160] = "";
+        const int ok = movie_stop_source(why, sizeof why);
+        fprintf(stderr, "[movie] skip: '%s'%s: %s\n", g_fd_path[fd], ok ? "" : " not possible", why);
+        return;
+    }
+}
+static int movie_is_skippable(const char* gpath)
+{
+    static int off = -1;
+    if (off < 0) off = getenv("RFOM_NO_MOVIE_SKIP") ? 1 : 0;
+    if (off) return 0;
+    const char* m = strstr(gpath, "/movies/");
+    if (!m) return 0;
+    const char* base = strrchr(gpath, '/'); base = base ? base + 1 : gpath;
+    const size_t n = strlen(base);
+    if (n < 4 || strcmp(base + n - 4, ".avi")) return 0;
+    if (strstr(base, "_lp")) return 0;   /* main-menu background loops */
+    return 1;
+}
+
 static int fd_alloc_file(FILE* f)
 {
     for (int i = 3; i < FS_MAX; i++) if (!g_files[i] && !g_dirs[i]) { g_files[i] = f; return i; }
@@ -281,6 +361,10 @@ static void cellFsOpen(ppu_context* ctx)
     if (fd < 0) { fclose(f); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
     if (fd_ptr) vm_write32(fd_ptr, (uint32_t)fd);
     g_fd_usm[fd] = (strstr(gpath, ".usm") != nullptr) ? 1 : 0;
+    g_fd_movie[fd] = (uint8_t)movie_is_skippable(gpath);
+    if (g_fd_movie[fd]) { g_rfom_movie_skip_req = 0;   /* fresh cutscene: forget earlier presses */
+                          g_rfom_movie_source = 0;     /* and the previous movie's player (set again when this one's is made) */
+                          g_fd_movie_t0[fd] = std::chrono::steady_clock::now(); }
     /* FS_CALLER=1: name the guest function that opened each file. A title whose
      * streaming layer opens a file and never reads it (You Don't Know Jack's
      * movies) is diagnosed from the opener: its sibling read path is the one
@@ -400,7 +484,7 @@ static void cellFsClose(ppu_context* ctx)
         fprintf(stderr, "[fs] close fd=%d  (by %s)\n", fd, w); }
     if (fd >= 0 && fd < FS_MAX && g_files[fd]) {
         if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
-        fclose(g_files[fd]); g_files[fd] = nullptr; g_fd_usm[fd] = 0;
+        fclose(g_files[fd]); g_files[fd] = nullptr; g_fd_usm[fd] = 0; g_fd_movie[fd] = 0;
     }
     ctx->gpr[3] = CELL_OK;
 }
