@@ -178,6 +178,8 @@ endif()
 add_executable(${PROJECT_NAME}
     main.cpp
     stubs.cpp
+    rfom_mods.cpp     # RFOM_MODS: mods folder (file overrides)
+    rfom_pcfeat.cpp   # F3 performance overlay, toasts
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}

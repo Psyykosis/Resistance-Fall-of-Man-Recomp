@@ -154,6 +154,9 @@ static thread_t      s_mix_thread;
 static int           s_mix_thread_live = 0;
 #endif
 static mutex_t       s_audio_mutex;
+/* Runtime mute, set by the window code (rsx_d3d12_backend.c) while the game
+ * window is in the background with RSX_FOCUS_PAUSE on. */
+volatile long g_ps3_audio_mute_rt = 0;
 
 /* Output mix buffer (stereo, one block worth) */
 static float s_mix_buffer[CELL_AUDIO_BLOCK_SAMPLES * 2];
@@ -378,9 +381,10 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
          * path. For unattended runs. */
         static int mute = -1;
         if (mute < 0) mute = getenv("PS3_MUTE") ? 1 : 0;
+        extern volatile long g_ps3_audio_mute_rt;   /* runtime mute (window focus lost, quit prompt) */
         memcpy(buf, stereo_samples, num_samples * 2 * sizeof(float));
         s_wasapi_render->lpVtbl->ReleaseBuffer(s_wasapi_render, num_samples,
-                                               mute ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
+                                               (mute || g_ps3_audio_mute_rt) ? AUDCLNT_BUFFERFLAGS_SILENT : 0);
     }
 }
 

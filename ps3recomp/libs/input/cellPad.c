@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <ctype.h>
 #include "../../runtime/platform/win32_compat.h"   /* GetTickCount64 on POSIX */
 #include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host */
 #include "ps3emu/log_first.h"
@@ -314,6 +315,55 @@ static const char* s_kbm_default =
 volatile long g_ml_mode = 1;                 /* 1 = direct */
 volatile double g_ml_deg_per_count = 0.05;   /* already x mouse_sensitivity */
 volatile int g_ml_invert_y = 0;
+/* PC options (env, written to settings.bat by the launcher):
+ *   PAD_MOUSE_SENS_Y=<x>   vertical mouse sensitivity relative to horizontal (default 1)
+ *   PAD_DEADZONE=<0..0.9>  controller stick deadzone, radial (default: per-axis 0.24, as before)
+ *   PAD_CURVE=<0.5..3>     stick response exponent past the deadzone (1 = linear)
+ *   PAD_AIM_HOLD=1         zoom (R3; MOUSE2 on the keyboard) while held instead of the
+ *                          game's click-to-toggle: letting go clicks R3 again if still zoomed */
+volatile double g_ml_sens_y = 1.0;
+static double s_pad_dz = -1.0, s_pad_curve = 1.0;
+static int s_pad_aim_hold = 0, s_pad_feat_init = 0;
+static void pad_feat_init(void)
+{
+    if (s_pad_feat_init) return;
+    s_pad_feat_init = 1;
+    const char* e;
+    if ((e = getenv("PAD_MOUSE_SENS_Y")) && *e) { double v = atof(e); if (v >= 0.1 && v <= 4.0) g_ml_sens_y = v; }
+    if ((e = getenv("PAD_DEADZONE")) && *e) { double v = atof(e); if (v >= 0.0 && v <= 0.9) s_pad_dz = v; }
+    if ((e = getenv("PAD_CURVE")) && *e) { double v = atof(e); if (v >= 0.5 && v <= 3.0) { s_pad_curve = v; if (s_pad_dz < 0.0) s_pad_dz = 7849.0 / 32767.0; } }
+    if ((e = getenv("PAD_AIM_HOLD")) && *e && *e != '0') s_pad_aim_hold = 1;
+    printf("[controls] PC options: vertical mouse x%.2f, stick deadzone %s%.2f, curve %.2f, zoom %s\n", g_ml_sens_y,
+           s_pad_dz < 0.0 ? "per-axis " : "radial ", s_pad_dz < 0.0 ? 7849.0 / 32767.0 : s_pad_dz, s_pad_curve,
+           s_pad_aim_hold ? "hold" : "toggle (game)");
+}
+/* Hold-to-zoom on top of the game's R3 toggle. `src` 0 keyboard, 1 controller; reset != 0
+ * (menus) forgets the state. After R3 is let go, if the game is still zoomed (stubs.cpp
+ * rfom_is_zoomed: the FOV it set is narrowed) within 0.5 s, R3 is pressed for 60 ms, starting
+ * 40 ms after the release so the game sees a separate click. */
+extern int rfom_is_zoomed(void);
+static u16 pad_aim_hold(int src, u16 btns, int reset)
+{
+    static int prev[2];
+    static ULONGLONG rel[2], pulse[2];
+    pad_feat_init();
+    if (!s_pad_aim_hold) return btns;
+    const ULONGLONG now = GetTickCount64();
+    const int down = (btns & CELL_PAD_CTRL_R3) != 0;
+    if (reset) { prev[src] = down; rel[src] = pulse[src] = 0; return btns; }
+    if (!down && prev[src]) rel[src] = now;
+    if (down) rel[src] = 0;
+    prev[src] = down;
+    if (rel[src] && now - rel[src] >= 40) {
+        if (now - rel[src] > 500) rel[src] = 0;
+        else if (rfom_is_zoomed()) { pulse[src] = now; rel[src] = 0; }
+    }
+    if (pulse[src]) {
+        if (now - pulse[src] < 60) btns |= CELL_PAD_CTRL_R3;
+        else pulse[src] = 0;
+    }
+    return btns;
+}
 volatile int g_ml_fed_rx = 0, g_ml_fed_ry = 0;   /* last stick deflection fed (-127..127) */
 volatile long g_kbm_ml_dx = 0, g_kbm_ml_dy = 0;  /* mouse counts for the direct look */
 /* v151: when the keyboard+mouse pad last fed port 0 (a connected controller
@@ -340,8 +390,18 @@ volatile int g_rfom_space_start = 0;   /* v160v: set by stubs.cpp while a level 
 volatile int g_rfom_use_kbm = 0;              /* an INTERACT key is held */
 volatile int g_rfom_kbm_interact_bound = 0;   /* controls.txt binds INTERACT */
 volatile int g_rfom_input_kbm = 0;            /* port 0 is the keyboard (no controller) */
-volatile u16 g_rfom_pad_btns0 = 0;            /* controller port 0 buttons (CELL_PAD_CTRL_*) */
+volatile u16 g_rfom_pad_btns0 = 0;
+volatile int g_rfom_input_block = 0;           /* v200: the quit prompt is up -- the game sees no input */            /* controller port 0 buttons (CELL_PAD_CTRL_*) */
 volatile u16 g_rfom_pad_interact = 0;         /* controller interact button, 0 = as on PS3 */
+/* Last-used input device, for the on-screen button prompts (project/stubs.cpp
+ * rfom_text_patch, the menu icon atlas in rsx_d3d12_backend.c):
+ * 0 = keyboard+mouse, 1 = Xbox/XInput pad, 2 = PlayStation pad (a Sony HID
+ * device is attached). g_rfom_prompt_gen bumps on every change.
+ * RFOM_PAD_GLYPHS = auto (default) | xbox | ps picks the pad style. */
+volatile int g_rfom_prompt_dev = 0;
+volatile long g_rfom_prompt_gen = 0;
+/* set by project/stubs.cpp: re-applies the prompts on the game's thread */
+void (*volatile g_rfom_prompt_tick)(void) = NULL;
 static void ctl_extra_load(void)
 {
     /* One-time migration of an older controls.txt: what was "Action / melee"
@@ -647,6 +707,8 @@ static void pad_poll_keyboard(void)
     vx += (ix - vx) * al; vy += (iy - vy) * al;
     double fx = vx * s_kbm_sens / 2500.0, fy = vy * s_kbm_sens / 2500.0;
     if (s_kbm_invert) fy = -fy;
+    pad_feat_init();
+    fy *= g_ml_sens_y;
 
     /* v162: in-game menus (pause etc.) only read the d-pad and Cross/Circle, but WASD are
      * bound to the left stick. While the in-play look code isn't running (paused, menus),
@@ -697,6 +759,7 @@ static void pad_poll_keyboard(void)
                      const char* b = strrchr(mp, '\\'); b = b ? b + 1 : mp;
                      fe3 = _stricmp(b, "ResistanceFoM.exe") ? 0 : 1; }
       if (fe3 && (GetAsyncKeyState(VK_SPACE) & 0x8000)) btns |= CELL_PAD_CTRL_START; }
+    btns = pad_aim_hold(0, btns, menu_raw);
     hs->buttons   = menu_raw ? btns : kbm_unswap(btns);   /* v152: undo the in-game button swaps for the keyboard */
     g_rfom_use_kbm = interact;
     hs->connected = 1;
@@ -731,17 +794,50 @@ static void pad_poll_keyboard(void)
 }
 #endif
 
+static int s_xi_present[PAD_MAX_HOST_PORTS];
+/* PAD_DEADZONE / PAD_CURVE: radial deadzone, then |v|^curve, direction kept. Y flipped as above (256 - y). */
+static void pad_stick_radial(short rx, short ry, u8* ox, u8* oy)
+{
+    const double x = rx / 32767.0, y = ry / 32767.0;
+    const double m = sqrt(x * x + y * y);
+    double sx = 0.0, sy = 0.0;
+    if (m > s_pad_dz && m > 1e-6) {
+        double t = (m - s_pad_dz) / (1.0 - s_pad_dz);
+        if (t > 1.0) t = 1.0;
+        t = pow(t, s_pad_curve);
+        sx = x / m * t; sy = y / m * t;
+    }
+    int vx = (int)(sx * 127.0) + 128, vy = (int)(sy * 127.0) + 128;
+    vx = vx < 0 ? 0 : vx > 255 ? 255 : vx; vy = vy < 0 ? 0 : vy > 255 ? 255 : vy;
+    *ox = (u8)vx; *oy = (u8)(256 - vy);
+}
 static void pad_poll_xinput(void)
 {
+    /* XInputGetState on an empty slot is slow (it probes the device stack), and
+     * this runs every 4 ms: empty slots are re-probed once a second, which is
+     * still hot-plug -- a pad plugged in is picked up within a second. */
+    /* XInput presence is tracked apart from s_host_state.connected: the keyboard
+     * path marks port 0 connected every frame, which used to defeat the retry
+     * throttle and log "disconnected" on every 4 ms poll. */
+    static ULONGLONG s_retry[PAD_MAX_HOST_PORTS];
+    const ULONGLONG tnow = GetTickCount64();
     for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
         XINPUT_STATE state;
         memset(&state, 0, sizeof(state));
 
+        if (!s_xi_present[i] && s_retry[i] && tnow < s_retry[i]) continue;
         DWORD result = XInputGetState((DWORD)i, &state);
         if (result != ERROR_SUCCESS) {
+            if (s_xi_present[i] || !s_retry[i])
+                printf("[cellPad] controller %d %s\n", i, s_retry[i] ? "disconnected" : "not present");
+            s_xi_present[i] = 0;
             s_host_state[i].connected = 0;
+            s_retry[i] = tnow + 1000;
             continue;
         }
+        if (!s_xi_present[i] && s_retry[i]) printf("[cellPad] controller %d connected\n", i);
+        s_xi_present[i] = 1;
+        s_retry[i] = tnow + 1000;
 
         s_host_state[i].connected = 1;
         XINPUT_GAMEPAD* gp = &state.Gamepad;
@@ -765,6 +861,8 @@ static void pad_poll_xinput(void)
         if (gp->wButtons & XINPUT_GAMEPAD_A)              btns |= CELL_PAD_CTRL_CROSS;
         if (gp->wButtons & XINPUT_GAMEPAD_X)              btns |= CELL_PAD_CTRL_SQUARE;
 
+        pad_feat_init();
+        if (i == 0) btns = pad_aim_hold(1, btns, g_rfom_play_ms == 0 || GetTickCount64() - g_rfom_play_ms > 500);
         s_host_state[i].buttons = btns;
         if (i == 0) g_rfom_pad_btns0 = btns;
 
@@ -772,10 +870,15 @@ static void pad_poll_xinput(void)
          * 128 (256 - x), NOT 255 - x: the latter turns a centered stick into 127,
          * whose bits (0x7F) alias SELECT+START and can make the guest self-exit.
          * (via sagemono, PR #42) */
+        if (s_pad_dz >= 0.0) {
+            pad_stick_radial(gp->sThumbLX, gp->sThumbLY, &s_host_state[i].analog_lx, &s_host_state[i].analog_ly);
+            pad_stick_radial(gp->sThumbRX, gp->sThumbRY, &s_host_state[i].analog_rx, &s_host_state[i].analog_ry);
+        } else {
         s_host_state[i].analog_lx = pad_xinput_stick_to_u8(gp->sThumbLX, PAD_STICK_DEADZONE);
         s_host_state[i].analog_ly = (u8)(256 - pad_xinput_stick_to_u8(gp->sThumbLY, PAD_STICK_DEADZONE));
         s_host_state[i].analog_rx = pad_xinput_stick_to_u8(gp->sThumbRX, PAD_STICK_DEADZONE);
         s_host_state[i].analog_ry = (u8)(256 - pad_xinput_stick_to_u8(gp->sThumbRY, PAD_STICK_DEADZONE));
+        }
 
         /* Triggers */
         s_host_state[i].trigger_l2 = gp->bLeftTrigger;
@@ -983,6 +1086,116 @@ static unsigned long long pad_now_ms(void)
 #endif
 }
 
+#ifdef _WIN32
+/* A Sony controller on the system (USB/Bluetooth HID, vendor 0x054C)? It only
+ * reaches XInput through a wrapper (Steam Input, DS4Windows...), so this is how
+ * a PlayStation pad is told apart from an Xbox one. Rescanned every 5 s. */
+static int pad_sony_present(void)
+{
+    static ULONGLONG next = 0; static int have = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now < next) return have;
+    next = now + 5000;
+    UINT n = 0; int found = 0;
+    if (GetRawInputDeviceList(NULL, &n, sizeof(RAWINPUTDEVICELIST)) == 0 && n && n < 512) {
+        RAWINPUTDEVICELIST* l = (RAWINPUTDEVICELIST*)malloc(n * sizeof *l);
+        if (l) {
+            const UINT got = GetRawInputDeviceList(l, &n, sizeof(RAWINPUTDEVICELIST));
+            for (UINT i = 0; i < got && got != (UINT)-1 && !found; i++) {
+                if (l[i].dwType != RIM_TYPEHID) continue;
+                char nm[512]; UINT sz = sizeof nm;
+                if (GetRawInputDeviceInfoA(l[i].hDevice, RIDI_DEVICENAME, nm, &sz) == (UINT)-1) continue;
+                nm[sizeof nm - 1] = 0;
+                for (char* c = nm; *c; c++) *c = (char)toupper((unsigned char)*c);
+                if (strstr(nm, "VID_054C")) found = 1;
+            }
+            free(l);
+        }
+    }
+    if (found != have) printf("[cellPad] PlayStation controller %s\n", found ? "detected (PS button prompts)" : "gone");
+    have = found;
+    return have;
+}
+static volatile int s_glyph_live = -1;   /* the PC menu's choice: 0 auto, 1 Xbox, 2 PlayStation; -1 = RFOM_PAD_GLYPHS */
+static int pad_glyph_style(void)   /* 1 = Xbox, 2 = PlayStation */
+{
+    static int force = -1;
+    if (force < 0) { const char* e = getenv("RFOM_PAD_GLYPHS");
+        force = (e && !_stricmp(e, "xbox")) ? 1 : (e && (!_stricmp(e, "ps") || !_stricmp(e, "playstation"))) ? 2 : 0; }
+    const int f = s_glyph_live >= 0 ? s_glyph_live : force;
+    if (f) return f;
+    return pad_sony_present() ? 2 : 1;
+}
+/* PC menu (rsx_pc_menu.inc): live button prompts and mouse sensitivity */
+void cellpad_set_glyph_pref(const char* v)
+{
+    s_glyph_live = (v && !_stricmp(v, "xbox")) ? 1 : (v && (!_stricmp(v, "ps") || !_stricmp(v, "playstation"))) ? 2 : 0;
+}
+double cellpad_mouse_sens(void) { return s_kbm_sens; }
+void cellpad_set_mouse_sens(double s)
+{
+    if (!(s >= 0.1)) s = 0.1;
+    if (s > 4.0) s = 4.0;
+    s_kbm_sens = s;
+    g_ml_deg_per_count = s_ml_deg * s_kbm_sens;
+}
+/* Keyboard or mouse used since the last poll? GetLastInputInfo only moves on
+ * keyboard/mouse input, so the key scan runs only when it moved. */
+static int pad_kbm_activity(void)
+{
+    static DWORD last_in = 0;
+    LASTINPUTINFO li; li.cbSize = sizeof li;
+    if (!GetLastInputInfo(&li) || li.dwTime == last_in) return 0;
+    last_in = li.dwTime;
+    if (!pad_host_window_focused()) return 0;
+    for (int vk = 0x01; vk <= 0xFE; vk++) {
+        if (vk == 0x07 || (vk >= 0x0A && vk <= 0x0B) || (vk >= VK_F1 && vk <= VK_F24) || vk == VK_SNAPSHOT ||
+            vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN) continue;   /* hotkeys don't switch */
+        if (GetAsyncKeyState(vk) & 0x8000) return 1;
+    }
+    /* raw mouse travel since the last poll (fed by the window's WM_INPUT) */
+    const long m = labs(g_kbm_mouse_dx) + labs(g_kbm_mouse_dy);
+    return m >= 6 || g_kbm_wheel != 0;
+}
+static int pad_pad_activity(const PadHostState* p)
+{
+    #define DEFL(v) (abs((int)(v) - 128) > 48)
+    return p->buttons || DEFL(p->analog_lx) || DEFL(p->analog_ly) || DEFL(p->analog_rx) || DEFL(p->analog_ry) ||
+           p->trigger_l2 > 40 || p->trigger_r2 > 40;
+    #undef DEFL
+}
+/* Port 0 takes the device used last: a connected controller no longer locks
+ * the keyboard and mouse out, and prompts follow whichever was touched. */
+static int pad_pick_device(void)
+{
+    static int last = -1;   /* 0 kbm, 1 pad */
+    static int was_conn = 0;
+    const int conn = s_xi_present[0];
+    const int kbm_act = pad_kbm_activity();
+    int cur = last;
+    if (!conn) cur = 0;
+    else if (!was_conn || last < 0) cur = 1;            /* just plugged in: the pad */
+    else if (pad_pad_activity(&s_host_state[0])) cur = 1;
+    else if (kbm_act) cur = 0;
+    was_conn = conn;
+    if (cur == 1) {
+        /* the keyboard path is idle: drop the mouse travel it would have used */
+        InterlockedExchange(&g_kbm_mouse_dx, 0); InterlockedExchange(&g_kbm_mouse_dy, 0);
+        InterlockedExchange(&g_kbm_wheel, 0);
+        if (last != 1) ClipCursor(NULL);
+    }
+    const int dev = cur == 0 ? 0 : pad_glyph_style();
+    if (dev != g_rfom_prompt_dev || last < 0) {
+        g_rfom_prompt_dev = dev;
+        InterlockedIncrement(&g_rfom_prompt_gen);
+        printf("[prompts] device -> %s\n", dev == 0 ? "keyboard+mouse" : dev == 1 ? "Xbox controller" : "PlayStation controller");
+        fflush(stdout);
+    }
+    last = cur;
+    return cur == 0;
+}
+#endif
+
 static void pad_poll_backend(void)
 {
     /* Benign race: two threads may poll in the same tick. That costs one extra
@@ -1003,10 +1216,20 @@ static void pad_poll_backend(void)
 #endif
 #ifdef _WIN32
     { static int once = 0; if (!once) { once = 1; ctl_extra_load(); } }
-    if (!s_host_state[0].connected) g_rfom_pad_btns0 = 0;
-    g_rfom_input_kbm = !s_host_state[0].connected;
-    if (!s_host_state[0].connected) pad_poll_keyboard();
+    const int use_kbm = pad_pick_device();
+    if (use_kbm) g_rfom_pad_btns0 = 0;
+    g_rfom_input_kbm = use_kbm;
+    if (use_kbm) pad_poll_keyboard();
 #endif
+    if (g_rfom_input_block) {   /* neutral pads, still connected */
+        for (int _i = 0; _i < PAD_MAX_HOST_PORTS; _i++) {
+            const int c = s_host_state[_i].connected;
+            memset(&s_host_state[_i], 0, sizeof s_host_state[_i]);
+            s_host_state[_i].connected = c;
+            s_host_state[_i].analog_lx = s_host_state[_i].analog_ly = 128;
+            s_host_state[_i].analog_rx = s_host_state[_i].analog_ry = 128;
+        }
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1071,6 +1294,7 @@ volatile u32 g_pad_data_ea0 = 0;   /* v147: guest address of port 0's last GetDa
 s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
 {
     if (port_no == 0 && data_guest) g_pad_data_ea0 = (u32)(uintptr_t)data_guest;
+    if (port_no == 0 && g_rfom_prompt_tick) g_rfom_prompt_tick();
     { static int _once = 0;
       if (!_once++) printf("[cellPad] GetData polling begins (port %u)\n", port_no); }
     if (!s_pad_initialized)

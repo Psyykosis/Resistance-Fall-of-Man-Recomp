@@ -13,6 +13,15 @@
  */
 
 #include "spu_dma.h"
+extern volatile int g_ps3_host_paused; /* sys_ppu_thread.c: port pause */
+/* While the port has the game paused, every channel access is where an idle
+ * SPU poll loop spends its time: nap 1 ms every 32 accesses so a paused SPU
+ * idles instead of spinning a core, yet still makes (slow) progress. */
+#define SPU_PAUSE_POINT() do { \
+        if (__builtin_expect(g_ps3_host_paused, 0)) { \
+            static SPU_THREAD_LOCAL unsigned t_pause_n; \
+            if ((++t_pause_n & 31u) == 0) Sleep(1); \
+        } } while (0)
 #include "spu_coherency.h" /* lock-line lock + PPU-write coherence bitmap */
 #include "spu_helpers.h"   /* spu_splat_u32 / spu_ls_read128 (SMC microstep) */
 #include "spu_lockstep.h"
@@ -1166,6 +1175,7 @@ static int channel_is_mfc(uint32_t ch)
  * ===========================================================================*/
 void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
 {
+    if (channel == MFC_Cmd) SPU_PAUSE_POINT();
     /* SPU_CHHIST=1: which channels a job actually touches, and how often. A
      * worker that never issues an MFC command is either not being handed its
      * work descriptor or is waiting on a channel we never satisfy; the channel
@@ -1396,21 +1406,38 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
      * up to SPU_WAIT_SPIN_US (default 100) first. Raw SPUs only by default;
      * SPU_WAIT_SPIN_ALL=1 spins every SPU context, SPU_WAIT_SPIN_US=0 = old. */
     {
-        static int s_spin_us = -1, s_spin_all = -1;
+        static int s_spin_us = -1, s_spin_all = -1, s_low = 0, s_fw = 1;
         static LARGE_INTEGER s_qf;
         if (s_spin_us < 0) {
             const char* e = getenv("SPU_WAIT_SPIN_US"); int v = e ? atoi(e) : 100;
             const char* a = getenv("SPU_WAIT_SPIN_ALL"); s_spin_all = a ? atoi(a) : 0;
+            const char* f = getenv("SPU_FAST_WAIT"); s_fw = f ? atoi(f) != 0 : 1;
+            /* Low-core CPUs (< 8 logical): the producer this SPU waits on may
+             * be queued behind the spinner -- offer the core on every poll
+             * (SwitchToThread returns at once when nothing else is ready).
+             * SPU_WAIT_YIELD=0/1 forces it off/on. */
+            SYSTEM_INFO si; GetSystemInfo(&si);
+            const char* y = getenv("SPU_WAIT_YIELD");
+            s_low = y ? atoi(y) != 0 : si.dwNumberOfProcessors < 8;
             QueryPerformanceFrequency(&s_qf);
             s_spin_us = v < 0 ? 0 : v;
         }
         if (s_spin_us > 0 && (s_spin_all || ctx->spu_id < 8u)) {
+            /* SPU_FAST_WAIT (default on, from the Resistance 2 port): poll the
+             * predicate every 4 pauses instead of 24 (wake latency) and read
+             * the clock every 16th poll instead of every one --
+             * QueryPerformanceCounter in this loop was ~10% of a raw SPU
+             * thread. Overshoot is a few microseconds. */
+            const int pauses = s_fw ? 4 : 24;
+            const unsigned clk_mask = s_fw ? 15u : 0u;
             LARGE_INTEGER q0, q; QueryPerformanceCounter(&q0);
             const LONGLONG lim = s_qf.QuadPart * s_spin_us / 1000000;
-            for (;;) {
+            for (unsigned it = 1;; it++) {
                 MemoryBarrier();
                 if (spu_ch_ready(ctx, channel)) break;
-                for (int k = 0; k < 24; k++) YieldProcessor();
+                for (int k = 0; k < pauses; k++) YieldProcessor();
+                if (s_low) SwitchToThread();
+                if (it & clk_mask) continue;
                 QueryPerformanceCounter(&q);
                 if (q.QuadPart - q0.QuadPart >= lim) break;
             }
@@ -1483,6 +1510,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
  * ===========================================================================*/
 u128 spu_rdch(spu_context* ctx, uint32_t channel)
 {
+    SPU_PAUSE_POINT();
     { static int s_c = -1; if (s_c < 0) { const char* e = getenv("SPU_CHHIST"); s_c = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0; }
       if (s_c) { static unsigned long long r[128]; static unsigned long long n;
           r[channel & 127]++;
@@ -1575,6 +1603,7 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
  * ===========================================================================*/
 uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
 {
+    SPU_PAUSE_POINT();
     /* SPU_WHOPOLLS=<n>: rchcnt/park accounting PER SPU, printed every n calls
      * with the pc each SPU is sitting at.
      *

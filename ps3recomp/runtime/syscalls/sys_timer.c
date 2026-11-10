@@ -261,13 +261,30 @@ int64_t sys_timer_usleep(ppu_context* ctx)
 #ifdef _WIN32
     /* Use high-resolution sleep via waitable timer for better precision */
     if (usec >= 1000) {
-        HANDLE timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+        /* From the Resistance 2 port: a plain waitable timer fires on the next
+         * 1 ms system tick, so a 16667 us sleep took ~17-18 ms (frame pacing
+         * and audio refill slack). Use one high-resolution timer per thread
+         * (Win10 1803+), created once instead of per sleep; falls back to the
+         * plain timer. PS3_USLEEP_TIMER_CACHE=0 restores create+close. */
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+        static volatile int s_tcache = -1;
+        if (s_tcache < 0) { const char* e = getenv("PS3_USLEEP_TIMER_CACHE"); s_tcache = e ? atoi(e) != 0 : 1; }
+        static __declspec(thread) HANDLE t_timer;
+        HANDLE timer = s_tcache ? t_timer : NULL;
+        if (!timer) {
+            timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_MANUAL_RESET |
+                                           CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            if (!timer) timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+            if (s_tcache) t_timer = timer;
+        }
         if (timer) {
             LARGE_INTEGER due;
             due.QuadPart = -((LONGLONG)usec * 10); /* 100ns units, negative = relative */
             SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
             WaitForSingleObject(timer, INFINITE);
-            CloseHandle(timer);
+            if (!s_tcache) CloseHandle(timer);
         } else {
             Sleep((DWORD)(usec / 1000));
         }

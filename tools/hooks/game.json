@@ -119,6 +119,7 @@
 "        const double _rfom_fov = ctx->fpr[3], _rfom_asp = ctx->fpr[4];",
 "        const uint32_t _rfom_cam = (uint32_t)R_3;",
 "        rfom_fov_note(_rfom_cam, _rfom_fov);   /* v182: zoom-scaled mouse follows the view camera only */",
+"        ctx->fpr[4] = -rfom_fov_adjust(-ctx->fpr[4]);   /* RFOM_ASPECT Hor+: a negative argument is the aspect (stubs.cpp) */",
 "        ctx->fpr[3] = rfom_fov_adjust(ctx->fpr[3]);"
 ]
 },

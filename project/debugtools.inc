@@ -1,6 +1,7 @@
 /* Resistance port (v132): F9 audio recording (cellAudio.c). */
 extern "C" volatile long g_audio_rec_blocks, g_audio_rec_seq;
 extern "C" unsigned cellGcm_flip_request_count(void);
+extern "C" volatile long rsx_focus_paused;   /* rsx_d3d12_backend.c: window in the background, game paused */
 extern "C" unsigned long ppu_host_tid_by_name(const char* name);
 extern "C" unsigned long spurs_lane_host_tid(unsigned lane);
 extern "C" unsigned long rsx_render_host_tid(void);
@@ -554,6 +555,18 @@ static DWORD WINAPI main_core_keeper(LPVOID)
     const int cpu = e ? atoi(e) : 2;   /* not CPU 0: Windows routes most interrupts there */
     DWORD_PTR proc = 0, sys = 0;
     if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys)) return 0;
+    /* Reserving two whole cores starves the SPU/worker threads on small CPUs
+     * (4C/4T, 4C/8T, 6C/6T): only pin by default with >= 12 logical CPUs.
+     * RFOM_MAIN_CORE=1 forces pinning, =0 disables it. */
+    {
+        int ncpu = 0;
+        for (DWORD_PTR m = proc; m; m &= m - 1) ncpu++;
+        const char* force = getenv("RFOM_MAIN_CORE");
+        if (ncpu < 12 && !(force && atoi(force) > 0)) {
+            fprintf(stderr, "[affinity] %d logical CPUs: core pinning off (RFOM_MAIN_CORE=1 forces it)%c", ncpu, 10);
+            return 0;
+        }
+    }
     const DWORD_PTR mine = (DWORD_PTR)1 << cpu;
     const DWORD_PTR pair = mine | ((DWORD_PTR)1 << (cpu ^ 1));
     /* v181: the RSX FIFO thread is the next limiter (F11: ~98% busy in York's
@@ -1029,7 +1042,7 @@ static DWORD WINAPI freeze_relauncher(LPVOID)
     for (;;) {
         Sleep(1000);
         const unsigned f = cellGcm_flip_request_count();
-        if (f != last || f < 200) { last = f; still = 0; continue; }
+        if (f != last || f < 200 || rsx_focus_paused) {   /* paused in the background: not a freeze */ last = f; still = 0; continue; }
         if (++still < secs) continue;
         static int n = 0;
         { char fn[64]; snprintf(fn, sizeof fn, "logs\\freeze_%lu_%d.txt", (unsigned long)GetTickCount(), n++);

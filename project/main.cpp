@@ -103,6 +103,9 @@ void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
 unsigned cellGcm_flip_request_count(void);
 }
 
+#include "rfom_crash.inc"   /* crash minidumps + hang watchdog -> logs\crash */
+#include "rfom_pcport.inc"  /* save folder, RFOM_PRESET */
+
 /* ---------------------------------------------------------------------------
  * RSX present backend
  * -----------------------------------------------------------------------*/
@@ -208,6 +211,16 @@ static DWORD WINAPI frame_clock(LPVOID)
     if (vb_us < 0) { const char* e = getenv("RSX_VBLANK_US"); vb_us = e ? atoll(e) : 16683; if (vb_us < 1000) vb_us = 16683; }
 
     for (;;) {
+        /* v200: window in the background (RSX_FOCUS_PAUSE) or the quit prompt
+         * is up: stop ticking vblank and draining the FIFO. The guest waits on
+         * the RSX like it would on a stalled GPU; keep pumping messages so the
+         * window still reacts. Game time is clamped per frame on resume. */
+        if (rsx_ok && rsx_focus_paused) {
+            Sleep(20);
+            if (rsx_backend_pump() != 0) rsx_ok = 0;
+            next_tick = fc_us();
+            continue;
+        }
         /* Resistance port: wake as soon as the guest publishes new FIFO work
          * (its `put` moves) instead of a blind Sleep(4). The guest fences many
          * passes per frame on labels this drain writes, so each blind sleep was
@@ -401,6 +414,9 @@ int main(int argc, char** argv)
 #endif
 
     printf("=== ps3recomp game runner ===\n");
+    rfom_crash_init();
+    rfom_save_location_init();
+    rfom_preset_init();
 
     if (!alloc_guest_vm()) {
         fprintf(stderr, "ERROR: could not allocate the guest address space\n");

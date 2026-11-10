@@ -841,8 +841,32 @@ static void read_param_sfo(const char* save_path, CellSaveDataSystemFileParam* p
     }
 }
 
-/* Core save/load implementation shared by List/Fixed/Auto variants */
+/* Saves in progress, for a clean quit (project/rfom_pcport.inc waits for 0
+ * before ending the process, so a save is never cut off half-written). */
+volatile long g_ps3_savedata_busy = 0;
+static s32 savedata_execute_impl(const char* dirName, int is_save,
+                             CellSaveDataSetBuf* setBuf,
+                             CellSaveDataStatCallback funcStat,
+                             CellSaveDataFileCallback funcFile,
+                             void* userdata);
 static s32 savedata_execute(const char* dirName, int is_save,
+                             CellSaveDataSetBuf* setBuf,
+                             CellSaveDataStatCallback funcStat,
+                             CellSaveDataFileCallback funcFile,
+                             void* userdata)
+{
+#ifdef _WIN32
+    InterlockedIncrement(&g_ps3_savedata_busy);
+#endif
+    const s32 r = savedata_execute_impl(dirName, is_save, setBuf, funcStat, funcFile, userdata);
+#ifdef _WIN32
+    InterlockedDecrement(&g_ps3_savedata_busy);
+#endif
+    return r;
+}
+
+/* Core save/load implementation shared by List/Fixed/Auto variants */
+static s32 savedata_execute_impl(const char* dirName, int is_save,
                              CellSaveDataSetBuf* setBuf,
                              CellSaveDataStatCallback funcStat,
                              CellSaveDataFileCallback funcFile,

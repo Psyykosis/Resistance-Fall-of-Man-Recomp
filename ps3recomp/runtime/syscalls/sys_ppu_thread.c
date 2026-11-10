@@ -40,7 +40,35 @@ static PPU_TLS int     s_exit_armed = 0;
 #include <process.h>   /* _beginthreadex: CRT-aware thread creation (raw CreateThread
                         * leaves per-thread CRT state uninit -> buffered fread() silently
                         * returns 0 on those threads). */
+
+/* Host thread priority boosts (guest audio threads, raw SPU 0) only with >= 8
+ * logical CPUs available to the process (from the Resistance 2 port). On a
+ * 4-core CPU a boosted thread that spins starves the normal-priority ones (the
+ * main thread, the GPU driver) until Windows' starvation boost rescues them
+ * seconds later: hitches and freezes. PS3_PRIO_BOOST=0/1 forces it. */
+int ps3_host_prio_boost(void)
+{
+    static volatile LONG s = -1;
+    if (s < 0) {
+        int v;
+        const char* e = getenv("PS3_PRIO_BOOST");
+        if (e && *e) v = atoi(e) != 0;
+        else {
+            DWORD_PTR pm = 0, sm = 0; int n = 0;
+            if (GetProcessAffinityMask(GetCurrentProcess(), &pm, &sm))
+                for (; pm; pm &= pm - 1) n++;
+            v = n == 0 || n >= 8;
+        }
+        fprintf(stderr, "[threads] host priority boosts %s (PS3_PRIO_BOOST)\n", v ? "on" : "off: fewer than 8 logical CPUs");
+        InterlockedExchange(&s, v);
+    }
+    return (int)s;
+}
 #endif
+
+/* Port pause (PC menu, window-in-background pause): set by the port while the
+ * game is paused. SPU channel polls nap instead of spinning while it is set. */
+volatile int g_ps3_host_paused = 0;
 
 /* ---------------------------------------------------------------------------
  * Globals
@@ -500,7 +528,9 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
      * ponytail: two host levels only; map the full range if a title needs it. */
     /* Resistance port: guest priority < 100 (Fall of Man: syn_tick_timer 10,
      * AudioDisplayPS3 50, the surround mixer 90-94) -> HIGHEST. */
-    if (priority < 100)
+    if (!ps3_host_prio_boost())
+        ;
+    else if (priority < 100)
         SetThreadPriority(t->host_thread, THREAD_PRIORITY_HIGHEST);
     else if (priority < 256)
         SetThreadPriority(t->host_thread, THREAD_PRIORITY_ABOVE_NORMAL);

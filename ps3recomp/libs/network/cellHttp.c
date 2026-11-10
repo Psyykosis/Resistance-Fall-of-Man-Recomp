@@ -998,3 +998,74 @@ s32 cellHttpAbortTransaction(CellHttpTransId transId)
     printf("[cellHttp] AbortTransaction(trans=%u)\n", transId);
     return CELL_OK;
 }
+
+/* cellHttpClientPollConnections(clientId, transId*, usec): wait up to `usec`
+ * (negative = forever) for one of the client's open connections to become
+ * readable and report which transaction it belongs to.
+ *
+ * With no open connection there is nothing to wait on, and the library says
+ * so at once with CELL_HTTP_ERROR_NO_CONNECTION. Titles that run a dedicated
+ * receive thread pace themselves on that error (Resistance 2's HttpRecvThread
+ * sleeps 1 ms and polls again). Left unregistered, the import faked CELL_OK
+ * without writing *transId, so that thread never reached its sleep and burned
+ * a whole host core for as long as it lived. */
+#define HTTP_POLL_SLICE_US 50000
+
+s32 cellHttpClientPollConnections(CellHttpClientId clientId, CellHttpTransId* transId, s64 usec)
+{
+    if (!s_http_initialized)
+        return CELL_HTTP_ERROR_NOT_INITIALIZED;
+
+    if (clientId >= CELL_HTTP_MAX_CLIENTS || !s_clients[clientId].in_use)
+        return CELL_HTTP_ERROR_BAD_CLIENT;
+
+    if (!transId)
+        return CELL_HTTP_ERROR_INVALID_PARAMETER;
+
+    s64 remaining = usec;
+    for (;;) {
+        fd_set rd;
+        FD_ZERO(&rd);
+        int nfds = 0, any = 0;
+        for (u32 i = 0; i < CELL_HTTP_MAX_TRANSACTIONS; i++) {
+            HttpTransSlot* t = &s_transactions[i];
+            if (!t->in_use || t->client != clientId || t->aborted || t->sock == HTTP_INVALID_SOCKET)
+                continue;
+            /* Bytes already buffered from the header read are ready now. */
+            if (t->body_overflow_len > 0) {
+                vm_write32((u32)(uintptr_t)transId, i);
+                return CELL_OK;
+            }
+            FD_SET(t->sock, &rd);
+            if ((int)t->sock + 1 > nfds) nfds = (int)t->sock + 1;
+            any = 1;
+        }
+        if (!any)
+            return CELL_HTTP_ERROR_NO_CONNECTION;
+
+        /* Wait in bounded slices so a transaction destroyed or aborted by
+         * another thread is dropped from the set instead of selected on. */
+        s64 slice = (remaining < 0 || remaining > HTTP_POLL_SLICE_US) ? HTTP_POLL_SLICE_US : remaining;
+        struct timeval tv;
+        tv.tv_sec  = (long)(slice / 1000000);
+        tv.tv_usec = (long)(slice % 1000000);
+        int r = select(nfds, &rd, NULL, NULL, &tv);
+        if (r < 0)
+            return CELL_HTTP_ERROR_NET_SELECT;
+        if (r > 0) {
+            for (u32 i = 0; i < CELL_HTTP_MAX_TRANSACTIONS; i++) {
+                HttpTransSlot* t = &s_transactions[i];
+                if (t->in_use && t->client == clientId && !t->aborted &&
+                    t->sock != HTTP_INVALID_SOCKET && FD_ISSET(t->sock, &rd)) {
+                    vm_write32((u32)(uintptr_t)transId, i);
+                    return CELL_OK;
+                }
+            }
+        }
+        if (remaining >= 0) {
+            remaining -= slice;
+            if (remaining <= 0)
+                return CELL_HTTP_ERROR_NET_SELECT_TIMEOUT;
+        }
+    }
+}

@@ -449,8 +449,9 @@ static void raw_spu_start(raw_spu* s)
      * channel between commands, so a high priority costs nothing; at normal
      * priority it was scheduled late under load and the mix underran
      * (crackle). SPU_RAW_PRIO=0 off. */
-    else { const char* e = getenv("SPU_RAW_PRIO");
-           if (!e || atoi(e)) SetThreadPriority(s->thread, THREAD_PRIORITY_HIGHEST); }
+    else { extern int ps3_host_prio_boost(void);   /* sys_ppu_thread.c: off below 8 logical CPUs */
+           const char* e = getenv("SPU_RAW_PRIO");
+           if (e ? atoi(e) != 0 : ps3_host_prio_boost()) SetThreadPriority(s->thread, THREAD_PRIORITY_HIGHEST); }
 #endif
 }
 

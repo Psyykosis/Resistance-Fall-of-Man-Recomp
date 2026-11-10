@@ -48,6 +48,8 @@ char* rsx_getenv(const char* name);
 #include <dxgi1_4.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
+#include <wincodec.h>
+#include <xinput.h>
 #include <intrin.h>   /* __rdtsc: PERF2 replay timers */
 #include "ps3emu/ps3_ftrace.h"
 /* Resistance port: frame-trace spans for the render side's one-off costs, so a
@@ -66,6 +68,10 @@ static inline void rft(int kind, uint32_t a, uint32_t b, uint64_t t0)
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
+#pragma comment(lib, "windowscodecs.lib")   /* screenshots (PNG via WIC) */
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "uuid.lib")
+#pragma comment(lib, "xinput.lib")          /* the quit prompt reads the pad itself */
 
 /* ---------------------------------------------------------------------------
  * Resistance port: on-disk shader cache.
@@ -396,6 +402,11 @@ typedef struct {
     u32   bl_dst;       /* v189c: destination offset (a copy texture, not a render target) */
     u16   gbc_mask;     /* v189c: units bound to a copy texture */
     float bl_u0, bl_v0, bl_du, bl_dv;
+    /* Pipeline the pre-pass resolved for this draw (valid for render frame
+     * pso_pre_gen with the blend key / cull it was looked up with); the
+     * replay reuses it instead of hashing the same key again. */
+    ID3D12PipelineState* pso_pre;
+    u32   pso_pre_gen, pso_pre_bk, pso_pre_cull;
 } D3D12DrawRecord;
 int fsr_mode(void);
 static void fsr_record(D3D12DrawRecord* dr, int vs_idx, char* dst, const char* csrc, const float* epi);
@@ -717,6 +728,11 @@ static u32                   s_vbb_index;          /* virtual backbuffer of the 
 static int                   s_disp_borderless;
 static RECT                  s_disp_windowed_rect; /* window rect to restore from borderless */
 static float                 s_blit_sharpen;
+/* RFOM_ASPECT (project/stubs.cpp): present aspect multiplier, and the tick a
+ * Hor+ camera was last set (the stretch only applies while that is recent:
+ * the game sets its cameras every frame; movies and 2D screens set none). */
+volatile float               g_rsx_aspect_mul = 1.0f;
+volatile unsigned long long  g_rsx_aspect_ms = 0;
 
 /* Resistance port (v136): internal render resolution. RSX_RES_SCALE=<f>
  * (1 = the PS3's 1280x720; 1.5 = 1920x1080; 2 = 2560x1440; 3 = 3840x2160).
@@ -871,9 +887,99 @@ static u64    s_perf_texbytes = 0;
 static int    s_perf_ntex = 0;
 static double perf_now(void)
 {
-    LARGE_INTEGER f, c;
-    QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
-    return (double)c.QuadPart / (double)f.QuadPart;
+    static double inv_f = 0.0;   /* QueryPerformanceFrequency is fixed at boot: ask once */
+    LARGE_INTEGER c;
+    if (inv_f == 0.0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); inv_f = 1.0 / (double)f.QuadPart; }
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * inv_f;
+}
+/* RSX_DRAWPROF=1: CPU cost per draw, by phase, logged every 5 s as
+ *   [drawprof] ... us/draw = record (verts, consts, tex binds) + prepass (srv, pso, tex upload) + replay (rt, pso, state, draw)
+ * rdtsc accumulators (a few ns each); each one is written by one thread only
+ * (record = FIFO thread, the rest = render thread), read racily by the printer. */
+enum { DP_REC, DP_REC_VTX, DP_REC_CB, DP_BIND, DP_PRE, DP_PRE_SRV, DP_PRE_PSO, DP_PRE_TEX,
+       DP_RP, DP_RP_RT, DP_RP_PSO, DP_RP_STATE, DP_RP_DRAW, DP_RF, DP_PRESENT, DP_WAIT, DP_N };
+static volatile u64 s_dp[DP_N];
+static volatile u64 s_dp_guest_draws, s_dp_records, s_dp_frames, s_dp_binds;
+static volatile u64 s_dp_filt_pso, s_dp_filt_state, s_dp_pso_reuse;
+static int s_dp_on = -1;
+/* The F3 overlay (project/rfom_pcfeat.cpp) switches the counters on at run time
+ * without the log (s_dp_log = RSX_DRAWPROF), and reads a 0.5 s window. */
+static int s_dp_log = 0;
+static volatile int s_dp_reset;
+static volatile double s_ov_fps, s_ov_dpf, s_ov_upd;
+static volatile LONG s_ov_seq;
+/* Replay redundant-state filter: s_rs_epoch moves whenever something outside
+ * the straight draw path (blit, FSR/DLSS passes) sets pipeline/root state. */
+static u32 s_rs_epoch = 1;
+static u32 s_rf_gen = 1;   /* render_frame counter (pso_pre validity) */
+static int s_draw_filter = -1;   /* RSX_DRAW_FILTER=0: issue every state call */
+static __forceinline int drawprof_on(void)
+{
+    if (s_dp_on < 0) { const char* e = getenv("RSX_DRAWPROF"); s_dp_on = (e && atoi(e)) ? 1 : 0; s_dp_log = s_dp_on;
+        if (s_dp_on) fprintf(stderr, "[drawprof] on: per-draw CPU cost by phase every 5 s%c", 10); }
+    return s_dp_on;
+}
+#define DP_T0() (drawprof_on() ? __rdtsc() : 0ull)
+#define DP_ADD(k, t0) do { if (s_dp_on > 0) s_dp[k] += __rdtsc() - (t0); } while (0)
+/* Render thread, once per render_frame: every 5 s print and reset. */
+static void dp_report(void)
+{
+    if (drawprof_on() <= 0) return;
+    static double q0 = 0.0; static u64 c0 = 0;
+    if (s_dp_reset) {
+        s_dp_reset = 0; q0 = 0.0;
+        for (int k = 0; k < DP_N; k++) s_dp[k] = 0;
+        s_dp_records = s_dp_guest_draws = s_dp_frames = s_dp_binds = 0;
+        s_dp_filt_pso = s_dp_filt_state = s_dp_pso_reuse = 0;
+    }
+    s_dp_frames++;
+    const double qn = perf_now(); const u64 cn = __rdtsc();
+    if (q0 == 0.0) { q0 = qn; c0 = cn; return; }
+    const double el = qn - q0;
+    if (el < (s_dp_log ? 5.0 : 0.5)) return;
+    const double tsc_hz = (double)(cn - c0) / el;          /* calibrated against QPC */
+    const double rec = s_dp_records ? (double)s_dp_records : 1.0;
+    double us[DP_N];
+    for (int k = 0; k < DP_N; k++) us[k] = (double)s_dp[k] / tsc_hz * 1e6;
+    const double record = us[DP_REC] + us[DP_BIND], prepass = us[DP_PRE], replay = us[DP_RP];
+    const double fr = s_dp_frames ? (double)s_dp_frames : 1.0;
+    s_ov_fps = fr / el; s_ov_dpf = (double)s_dp_records / fr;
+    s_ov_upd = s_dp_records ? (record + prepass + replay) / rec : 0.0;
+    InterlockedIncrement(&s_ov_seq);
+    if (s_dp_log)
+    fprintf(stderr, "[drawprof] %.1f s: %llu draws (%llu guest draw calls, %llu tex binds), %.0f draws/frame, %.1f fps | "
+                    "CPU %.2f us/draw = record %.2f (verts %.2f, consts %.2f, tex binds %.2f) + prepass %.2f (srv %.2f, pso %.2f, tex upload %.2f) "
+                    "+ replay %.2f (rt %.2f, pso %.2f, state %.2f, draw %.2f) | filtered: %llu PSO sets, %llu state calls, %llu PSO lookups reused | "
+                    "per frame: render %.2f ms, present %.2f ms, gpu-wait %.2f ms%c",
+            el, (unsigned long long)s_dp_records, (unsigned long long)s_dp_guest_draws, (unsigned long long)s_dp_binds,
+            rec / fr, fr / el,
+            (record + prepass + replay) / rec,
+            record / rec, us[DP_REC_VTX] / rec, us[DP_REC_CB] / rec, us[DP_BIND] / rec,
+            prepass / rec, us[DP_PRE_SRV] / rec, us[DP_PRE_PSO] / rec, us[DP_PRE_TEX] / rec,
+            replay / rec, us[DP_RP_RT] / rec, us[DP_RP_PSO] / rec, us[DP_RP_STATE] / rec, us[DP_RP_DRAW] / rec,
+            (unsigned long long)s_dp_filt_pso, (unsigned long long)s_dp_filt_state, (unsigned long long)s_dp_pso_reuse,
+            us[DP_RF] / fr / 1000.0, us[DP_PRESENT] / fr / 1000.0, us[DP_WAIT] / fr / 1000.0, 10);
+    for (int k = 0; k < DP_N; k++) s_dp[k] = 0;
+    s_dp_records = s_dp_guest_draws = s_dp_frames = s_dp_binds = 0;
+    s_dp_filt_pso = s_dp_filt_state = s_dp_pso_reuse = 0;
+    q0 = qn; c0 = cn;
+}
+/* F3 overlay (project/rfom_pcfeat.cpp). */
+void rsx_prof_enable(int on)
+{
+    drawprof_on();
+    if (s_dp_log) return;                  /* RSX_DRAWPROF already counts */
+    if (on && s_dp_on <= 0) s_dp_reset = 1;
+    s_dp_on = on ? 1 : 0;
+}
+/* Latest 0.5 s window (5 s with RSX_DRAWPROF): render frames/s, draws/frame,
+ * CPU us/draw. Returns 0 before the first window. */
+int rsx_prof_sample(double* fps, double* draws_per_frame, double* us_per_draw)
+{
+    if (!s_ov_seq) return 0;
+    *fps = s_ov_fps; *draws_per_frame = s_ov_dpf; *us_per_draw = s_ov_upd;
+    return 1;
 }
 /* VP_SUBMIT=<N> logs the first N; VP_SUBMIT_EVERY=<P> then repeats a burst of N
  * every P, so a scene reached minutes after boot (a cinematic) is covered too. */
@@ -935,6 +1041,267 @@ static void disp_set_borderless(HWND hwnd, int on)
     fprintf(stderr, "[display] %s%c", on ? "borderless fullscreen" : "windowed", 10);
 }
 
+/* ---------------------------------------------------------------------------
+ * PC-port window features (v200)
+ *   - pause + mute while the window is in the background (RSX_FOCUS_PAUSE,
+ *     default 1; RSX_FOCUS_MUTE, default = RSX_FOCUS_PAUSE). project/main.cpp's
+ *     frame clock stops draining the guest's FIFO while paused, which stops
+ *     the game the way a stalled GPU would; game time is clamped per frame,
+ *     so nothing jumps on return.
+ *   - quit to desktop: F10, Esc held 1 s, or Start held 1.5 s shows a small
+ *     "Quit to desktop?" prompt (Enter / A = yes, Esc / B = no). Closing the
+ *     window (X, Alt+F4) quits without asking. Either way the process waits
+ *     for a save in progress (cellSaveData) before it ends.
+ *   - screenshots: F12 or PrtScn -> screenshots\RFOM_<date>_<time>.png
+ *     (the final displayed image, after upscaling and sharpening).
+ *   - RSX_MONITOR=<n>: open on monitor n (1 = primary, 2.. = the others in
+ *     Windows' order).
+ * -------------------------------------------------------------------------*/
+volatile long rsx_focus_paused = 0;        /* read by main.cpp, the watchdogs */
+static volatile long s_app_active = 1;
+static volatile long s_quit_req = 0;       /* 1 = ask, 2 = quit now */
+static volatile long s_quit_prompt = 0;    /* the prompt is up (the game is paused) */
+static volatile long s_shot_req = 0;
+static volatile long s_quitting = 0;       /* never pause again: a save may need to finish */
+extern volatile long g_ps3_audio_mute_rt;  /* cellAudio.c */
+extern volatile long g_ps3_savedata_busy;  /* cellSaveData.c */
+extern volatile int g_rfom_input_block;    /* cellPad.c */
+extern volatile int g_ps3_host_paused;     /* sys_ppu_thread.c: SPU polls nap while set */
+
+static int pc_focus_pause_on(void)
+{
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("RSX_FOCUS_PAUSE"); v = e ? atoi(e) : 1; }
+    return v;
+}
+static int pc_focus_mute_on(void)
+{
+    static int v = -1;
+    if (v < 0) { const char* e = getenv("RSX_FOCUS_MUTE"); v = e ? atoi(e) : pc_focus_pause_on(); }
+    return v;
+}
+
+/* End the process cleanly: wait (up to 30 s) until no save is being written,
+ * flush the logs, end. Never returns. */
+static void pc_quit_clean(const char* why)
+{
+    fprintf(stderr, "[quit] %s -- waiting for saves to finish%c", why, 10); fflush(stderr);
+    s_quitting = 1; rsx_focus_paused = 0; g_ps3_host_paused = 0;   /* let the game finish a save it is in the middle of */
+    const ULONGLONG t0 = GetTickCount64();
+    ULONGLONG idle_since = 0;
+    for (;;) {
+        const ULONGLONG now = GetTickCount64();
+        if (g_ps3_savedata_busy > 0) idle_since = 0;
+        else if (!idle_since) idle_since = now;
+        if (idle_since && now - idle_since >= 400) break;   /* idle for a moment: no save about to start */
+        if (now - t0 > 30000) { fprintf(stderr, "[quit] a save is still running after 30 s -- quitting anyway%c", 10); break; }
+        Sleep(20);
+    }
+    fprintf(stderr, "[quit] clean exit%c", 10);
+    fflush(stdout); fflush(stderr); _flushall();
+    ExitProcess(0);
+}
+
+static LRESULT CALLBACK pc_prompt_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
+        HBRUSH bg = CreateSolidBrush(RGB(18, 18, 20)); FillRect(dc, &rc, bg); DeleteObject(bg);
+        HBRUSH fr = CreateSolidBrush(RGB(170, 40, 30)); FrameRect(dc, &rc, fr);
+        RECT r2 = { rc.left + 1, rc.top + 1, rc.right - 1, rc.bottom - 1 }; FrameRect(dc, &r2, fr); DeleteObject(fr);
+        SetBkMode(dc, TRANSPARENT);
+        const int H = rc.bottom - rc.top;
+        HFONT f1 = CreateFontA(-(H * 30 / 100), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS, 0, ANTIALIASED_QUALITY, 0, "Bahnschrift SemiBold");
+        HFONT f2 = CreateFontA(-(H * 18 / 100), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS, 0, ANTIALIASED_QUALITY, 0, "Bahnschrift");
+        HGDIOBJ of = SelectObject(dc, f1);
+        SetTextColor(dc, RGB(240, 240, 240));
+        RECT t1 = { rc.left, rc.top + H * 12 / 100, rc.right, rc.top + H * 55 / 100 };
+        DrawTextA(dc, "Quit to desktop?", -1, &t1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, f2);
+        SetTextColor(dc, RGB(190, 190, 190));
+        RECT t2 = { rc.left, rc.top + H * 55 / 100, rc.right, rc.top + H * 88 / 100 };
+        DrawTextA(dc, "Enter / A = yes        Esc / B = no", -1, &t2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, of); DeleteObject(f1); DeleteObject(f2);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+/* the pad buttons for the prompt, read here: the game (and its pad polling)
+ * is paused while the prompt is up */
+static WORD pc_xinput_buttons(void)
+{
+    static ULONGLONG nopad_until = 0;   /* probing an empty slot is slow: once a second */
+    const ULONGLONG now = GetTickCount64();
+    if (now < nopad_until) return 0;
+    WORD b = 0;
+    for (DWORD i = 0; i < 4; i++) {
+        XINPUT_STATE st;
+        if (XInputGetState(i, &st) == ERROR_SUCCESS) b |= st.Gamepad.wButtons;
+        else { if (i == 0) nopad_until = now + 1000; break; }
+    }
+    return b;
+}
+#define PC_KD(vk) ((GetAsyncKeyState(vk) & 0x8000) != 0)
+static int pc_prompt_run(void)   /* 1 = quit */
+{
+    HWND game = s_d3d.hwnd;
+    static int reg = 0;
+    if (!reg) { reg = 1; WNDCLASSEXA wc = {0}; wc.cbSize = sizeof wc; wc.lpfnWndProc = pc_prompt_wndproc;
+                wc.hInstance = GetModuleHandle(NULL); wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.lpszClassName = "rfom_quit_prompt";
+                RegisterClassExA(&wc); }
+    RECT gr; if (!game || !GetWindowRect(game, &gr)) return 0;
+    const int gw = gr.right - gr.left, gh = gr.bottom - gr.top;
+    int w = gw * 36 / 100, h = gh * 16 / 100;
+    if (w < 360) w = 360; if (h < 110) h = 110; if (w > 900) w = 900; if (h > 260) h = 260;
+    HWND pw = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, "rfom_quit_prompt", "Quit",
+                              WS_POPUP, gr.left + (gw - w) / 2, gr.top + (gh - h) / 2, w, h, game, NULL, GetModuleHandle(NULL), NULL);
+    if (!pw) return 0;
+    ShowWindow(pw, SW_SHOWNOACTIVATE); UpdateWindow(pw);
+    fprintf(stderr, "[quit] prompt shown%c", 10);
+    /* what opened it must be let go first */
+    int armed = 0, result = -1;
+    while (result < 0) {
+        MSG m; while (PeekMessageA(&m, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageA(&m); }
+        Sleep(15);
+        if (s_quit_req == 2) { result = 1; break; }
+        const WORD xb = pc_xinput_buttons();
+        const int fg = GetForegroundWindow() == game || GetForegroundWindow() == pw;
+        const int yes = fg && (PC_KD(VK_RETURN) || PC_KD('Y') || (xb & XINPUT_GAMEPAD_A));
+        const int no  = fg && (PC_KD(VK_ESCAPE) || PC_KD('N') || PC_KD(VK_BACK) || (xb & XINPUT_GAMEPAD_B));
+        if (!armed) { if (!yes && !no && !(xb & XINPUT_GAMEPAD_START) && !PC_KD(VK_F10)) armed = 1; continue; }
+        if (yes) result = 1; else if (no) result = 0;
+    }
+    DestroyWindow(pw);
+    if (!result) {   /* let go of Esc / B before the game sees input again */
+        const ULONGLONG t0 = GetTickCount64();
+        while ((PC_KD(VK_ESCAPE) || PC_KD(VK_BACK) || PC_KD('N') || (pc_xinput_buttons() & XINPUT_GAMEPAD_B)) && GetTickCount64() - t0 < 3000) Sleep(15);
+        fprintf(stderr, "[quit] cancelled%c", 10);
+    }
+    return result;
+}
+
+#include "rsx_pc_menu.inc"   /* the PC menu: Resume / PC Options / Quit to Desktop (RFOM_MENU_PC=0 off) */
+
+static DWORD WINAPI pc_quit_thread(LPVOID unused)
+{
+    (void)unused;
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("RFOM_QUIT_PROMPT"); en = e ? atoi(e) : 1; }
+    ULONGLONG esc_t = 0, start_t = 0;
+    for (;;) {
+        Sleep(30);
+        if (s_quit_req == 2) pc_quit_clean("window closed");
+        const ULONGLONG now = GetTickCount64();
+        const int fg = s_d3d.hwnd && GetForegroundWindow() == s_d3d.hwnd;
+        /* long presses: Esc 1 s, Start 1.5 s */
+        if (fg && PC_KD(VK_ESCAPE)) { if (!esc_t) esc_t = now; } else esc_t = 0;
+        if (fg && (pc_xinput_buttons() & XINPUT_GAMEPAD_START)) { if (!start_t) start_t = now; } else start_t = 0;
+        if (en && ((esc_t && now - esc_t >= 1000) || (start_t && now - start_t >= 1500))) s_quit_req = 1;
+        if (s_quit_req != 1) { if (en) pm_hint_tick(fg); continue; }
+        if (!en) { s_quit_req = 0; continue; }
+        esc_t = start_t = 0;
+        pm_hint_hide();
+        g_rfom_input_block = 1; s_quit_prompt = 1;
+        const int q = pm_enabled() ? pm_run() : pc_prompt_run();
+        if (q) pc_quit_clean("quit to desktop");
+        s_quit_req = 0; s_quit_prompt = 0; g_rfom_input_block = 0;
+    }
+}
+#undef PC_KD
+
+/* The window's background/foreground state -> pause and mute. Called from
+ * the message pump (the window's thread). */
+static void pc_focus_update(void)
+{
+    const HWND hw = s_d3d.hwnd;
+    const int bg = hw && (!s_app_active || IsIconic(hw));
+    const long pause = !s_quitting && ((pc_focus_pause_on() && bg) || s_quit_prompt);
+    const long mute  = s_quitting || (pc_focus_mute_on() && bg) || s_quit_prompt;
+    if (pause != rsx_focus_paused) {
+        rsx_focus_paused = pause;
+        g_ps3_host_paused = (int)pause;   /* SPU channel polls nap while paused */
+        fprintf(stderr, "[focus] %s%c", pause ? (s_quit_prompt ? "paused (quit prompt)" : "paused (window in the background)") : "resumed", 10);
+    }
+    if (mute != g_ps3_audio_mute_rt) g_ps3_audio_mute_rt = mute;
+}
+
+/* monitors, primary first, then Windows' enumeration order */
+typedef struct { RECT r[16]; int n; } PcMons;
+static BOOL CALLBACK pc_mon_cb(HMONITOR hm, HDC dc, LPRECT rc, LPARAM lp)
+{
+    (void)dc; (void)rc;
+    PcMons* m = (PcMons*)lp;
+    MONITORINFO mi; mi.cbSize = sizeof mi;
+    if (m->n < 16 && GetMonitorInfoA(hm, &mi)) {
+        if (mi.dwFlags & MONITORINFOF_PRIMARY) { memmove(&m->r[1], &m->r[0], sizeof(RECT) * (size_t)m->n); m->r[0] = mi.rcMonitor; }
+        else m->r[m->n] = mi.rcMonitor;
+        m->n++;
+    }
+    return TRUE;
+}
+static int pc_monitors(RECT* out, int max)
+{
+    PcMons m; m.n = 0;
+    EnumDisplayMonitors(NULL, NULL, pc_mon_cb, (LPARAM)&m);
+    if (m.n > max) m.n = max;
+    memcpy(out, m.r, sizeof(RECT) * (size_t)m.n);
+    return m.n;
+}
+
+typedef struct { u8* px; u32 w, h, pitch; } PcShot;
+static DWORD WINAPI pc_shot_thread(LPVOID arg)
+{
+    PcShot* s = (PcShot*)arg;
+    CreateDirectoryA("screenshots", NULL);
+    SYSTEMTIME st; GetLocalTime(&st);
+    wchar_t path[MAX_PATH];
+    _snwprintf(path, MAX_PATH, L"screenshots\\RFOM_%04u%02u%02u_%02u%02u%02u_%03u.png",
+               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    /* RGBA -> BGR rows for the PNG encoder */
+    const u32 stride = s->w * 3;
+    u8* bgr = (u8*)malloc((size_t)stride * s->h);
+    int ok = 0;
+    if (bgr) {
+        for (u32 y = 0; y < s->h; y++) {
+            const u8* src = s->px + (size_t)y * s->pitch; u8* d = bgr + (size_t)y * stride;
+            for (u32 x = 0; x < s->w; x++) { d[x * 3 + 0] = src[x * 4 + 2]; d[x * 3 + 1] = src[x * 4 + 1]; d[x * 3 + 2] = src[x * 4 + 0]; }
+        }
+        const HRESULT ci = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+        IWICImagingFactory* f = NULL; IWICStream* ws = NULL; IWICBitmapEncoder* enc = NULL;
+        IWICBitmapFrameEncode* fr = NULL; IPropertyBag2* pb = NULL;
+        if (SUCCEEDED(CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, &IID_IWICImagingFactory, (void**)&f)) && f &&
+            SUCCEEDED(f->lpVtbl->CreateStream(f, &ws)) && ws &&
+            SUCCEEDED(ws->lpVtbl->InitializeFromFilename(ws, path, GENERIC_WRITE)) &&
+            SUCCEEDED(f->lpVtbl->CreateEncoder(f, &GUID_ContainerFormatPng, NULL, &enc)) && enc &&
+            SUCCEEDED(enc->lpVtbl->Initialize(enc, (IStream*)ws, WICBitmapEncoderNoCache)) &&
+            SUCCEEDED(enc->lpVtbl->CreateNewFrame(enc, &fr, &pb)) && fr &&
+            SUCCEEDED(fr->lpVtbl->Initialize(fr, pb)) &&
+            SUCCEEDED(fr->lpVtbl->SetSize(fr, s->w, s->h))) {
+            WICPixelFormatGUID pf = GUID_WICPixelFormat24bppBGR;
+            if (SUCCEEDED(fr->lpVtbl->SetPixelFormat(fr, &pf)) && IsEqualGUID(&pf, &GUID_WICPixelFormat24bppBGR) &&
+                SUCCEEDED(fr->lpVtbl->WritePixels(fr, s->h, stride, stride * s->h, bgr)) &&
+                SUCCEEDED(fr->lpVtbl->Commit(fr)) && SUCCEEDED(enc->lpVtbl->Commit(enc))) ok = 1;
+        }
+        if (pb) pb->lpVtbl->Release(pb);
+        if (fr) fr->lpVtbl->Release(fr);
+        if (enc) enc->lpVtbl->Release(enc);
+        if (ws) ws->lpVtbl->Release(ws);
+        if (f) f->lpVtbl->Release(f);
+        if (SUCCEEDED(ci)) CoUninitialize();
+        free(bgr);
+    }
+    fprintf(stderr, ok ? "[screenshot] saved %ls (%ux%u)%c" : "[screenshot] FAILED writing %ls (%ux%u)%c", path, s->w, s->h, 10);
+    { extern void rfpf_toast(const char* title, const char* text, char badge);   /* project/rfom_pcfeat.cpp */
+      char t[MAX_PATH + 16]; snprintf(t, sizeof t, "%ls (%ux%u)", path, s->w, s->h);
+      rfpf_toast(ok ? "Screenshot saved" : "Screenshot FAILED", t, 0); }
+    free(s->px); free(s);
+    return 0;
+}
+
 static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
@@ -942,6 +1309,10 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         InterlockedExchange(&s_sc_resize, 1);   /* the render thread resizes the swap chain */
         break;
     case WM_SYSKEYDOWN:
+        if (wp == VK_F10 && !(GetKeyState(VK_CONTROL) & 0x8000)) {   /* F10: quit prompt (Ctrl+F10 is a debug key) */
+            if (!(lp & (1 << 30)) && !s_quit_req) InterlockedExchange(&s_quit_req, 1);
+            return 0;
+        }
         if (wp == VK_RETURN && (lp & (1 << 29))) {   /* Alt+Enter */
             if (!(lp & (1 << 30))) disp_set_borderless(hwnd, !s_disp_borderless);
             return 0;
@@ -950,20 +1321,32 @@ static LRESULT CALLBACK d3d12_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SYSCHAR:
         if (wp == VK_RETURN) return 0;   /* no "ding" on Alt+Enter */
         break;
-    case WM_CLOSE:
-        s_d3d.window_closed = 1;
-        DestroyWindow(hwnd);
-        return 0;
+    case WM_SYSKEYUP:
+        if (wp == VK_SNAPSHOT) { InterlockedExchange(&s_shot_req, 1); return 0; }   /* Alt+PrtScn */
+        if (wp == VK_F10) return 0;   /* F10 is a "system" key: don't open the (absent) menu bar */
+        break;
+    case WM_KEYUP:
+        if (wp == VK_SNAPSHOT) InterlockedExchange(&s_shot_req, 1);   /* PrtScn only sends key-up */
+        break;
+    case WM_ACTIVATEAPP:
+        s_app_active = wp != 0;
+        if (!wp) ClipCursor(NULL);   /* give the mouse back right away */
+        break;
+    case WM_CLOSE: {
+        /* v200: X / Alt+F4 quit for real (the process used to keep running
+         * headless), after any save in progress has been written */
+        static int closing = 0;
+        if (!closing) { closing = 1; InterlockedExchange(&s_quit_req, 2);
+                        ShowWindow(hwnd, SW_HIDE); ClipCursor(NULL); }
+        return 0; }
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
     case WM_KEYDOWN:
+        if (wp == VK_F12 && !(GetKeyState(VK_CONTROL) & 0x8000) && !(lp & (1 << 30))) InterlockedExchange(&s_shot_req, 1);
         /* Resistance port: Esc is the game's pause button now (controls.txt);
          * ESC_CLOSES=1 restores closing the window on it. */
-        if (wp == VK_ESCAPE && getenv("ESC_CLOSES")) {
-            s_d3d.window_closed = 1;
-            DestroyWindow(hwnd);
-        }
+        if (wp == VK_ESCAPE && getenv("ESC_CLOSES")) InterlockedExchange(&s_quit_req, 2);
         return 0;
     case WM_INPUT: {
         /* Raw mouse deltas for the keyboard+mouse pad (libs/input/cellPad.c). */
@@ -1008,6 +1391,21 @@ static HWND create_window(u32 width, u32 height, const char* title)
       if (e && sscanf(e, "%ux%u", &a, &b) == 2 && a >= 320 && b >= 200 && a <= 16384 && b <= 16384) { cw = a; ch = b; } }
     RECT wr = {0, 0, (LONG)cw, (LONG)ch};
     AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
+    /* v200: RSX_MONITOR=<n> -- centre the window on monitor n (1 = primary);
+     * borderless fullscreen then uses that monitor too */
+    int wx = CW_USEDEFAULT, wy = CW_USEDEFAULT;
+    { const char* e = getenv("RSX_MONITOR"); const int want = e ? atoi(e) : 0;
+      if (want > 0) {
+          RECT mons[16]; int n = pc_monitors(mons, 16);
+          if (want <= n) {
+              const RECT m = mons[want - 1];
+              const int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
+              wx = m.left + ((m.right - m.left) - ww) / 2; wy = m.top + ((m.bottom - m.top) - wh) / 2;
+              if (wx < m.left) wx = m.left; if (wy < m.top) wy = m.top;
+              fprintf(stderr, "[display] monitor %d of %d (%ldx%ld at %ld,%ld)%c", want, n,
+                      m.right - m.left, m.bottom - m.top, m.left, m.top, 10);
+          } else fprintf(stderr, "[display] RSX_MONITOR=%d but only %d monitor(s) -- using the default%c", want, n, 10);
+      } }
 
     /* Keep the display awake (see rsx_null_backend.c). */
     SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
@@ -1015,7 +1413,7 @@ static HWND create_window(u32 width, u32 height, const char* title)
         0, "ps3recomp_d3d12",
         title ? title : "ps3recomp (D3D12)",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT,
+        wx, wy,
         wr.right - wr.left, wr.bottom - wr.top,
         NULL, NULL, GetModuleHandle(NULL), NULL);
     /* Resistance port: raw mouse input for mouse-look (cellPad.c). */
@@ -1031,6 +1429,7 @@ static HWND create_window(u32 width, u32 height, const char* title)
         const char* dm = getenv("RSX_DISPLAY");
         if (dm && (!_stricmp(dm, "borderless") || !_stricmp(dm, "fullscreen") || !strcmp(dm, "1")))
             disp_set_borderless(hw, 1);
+        { HANDLE th = CreateThread(NULL, 0, pc_quit_thread, NULL, 0, NULL); if (th) CloseHandle(th); }
     }
     return hw;
 }
@@ -1215,8 +1614,11 @@ static void present_blit(int vs)
     cl->lpVtbl->ClearRenderTargetView(cl, rtv, black, 0, NULL);
     cl->lpVtbl->OMSetRenderTargets(cl, 1, &rtv, FALSE, NULL);
 
-    /* letterbox / pillarbox to the guest frame's aspect */
-    const float ga = (float)s_d3d.width / (float)s_d3d.height, sa = (float)s_sc_w / (float)s_sc_h;
+    /* letterbox / pillarbox to the guest frame's aspect -- widened by RFOM_ASPECT
+     * (project/stubs.cpp) while the game renders through a Hor+ camera */
+    float ga = (float)s_d3d.width / (float)s_d3d.height;
+    const float sa = (float)s_sc_w / (float)s_sc_h;
+    if (g_rsx_aspect_ms && GetTickCount64() - g_rsx_aspect_ms < 500) ga *= g_rsx_aspect_mul;
     D3D12_VIEWPORT vp = {0};
     if (sa > ga) { vp.Height = (float)s_sc_h; vp.Width = (float)s_sc_h * ga; vp.TopLeftX = ((float)s_sc_w - vp.Width) * 0.5f; }
     else         { vp.Width = (float)s_sc_w; vp.Height = (float)s_sc_w / ga; vp.TopLeftY = ((float)s_sc_h - vp.Height) * 0.5f; }
@@ -1235,9 +1637,37 @@ static void present_blit(int vs)
     cl->lpVtbl->IASetPrimitiveTopology(cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cl->lpVtbl->DrawInstanced(cl, 3, 1, 0, 0);
 
+    /* v200 screenshot: copy the finished back buffer to a readback buffer */
+    static ID3D12Resource* shot_buf = NULL; static u64 shot_size = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT shot_fp; int shot = 0;
+    if (s_shot_req && InterlockedExchange(&s_shot_req, 0)) {
+        D3D12_RESOURCE_DESC sd; s_sc_buf[bi]->lpVtbl->GetDesc(s_sc_buf[bi], &sd);
+        UINT64 total = 0;
+        s_d3d.device->lpVtbl->GetCopyableFootprints(s_d3d.device, &sd, 0, 1, 0, &shot_fp, NULL, NULL, &total);
+        if (shot_buf && shot_size < total) { shot_buf->lpVtbl->Release(shot_buf); shot_buf = NULL; }
+        if (!shot_buf) {
+            D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_READBACK;
+            D3D12_RESOURCE_DESC bd = {0};
+            bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = total; bd.Height = 1; bd.DepthOrArraySize = 1;
+            bd.MipLevels = 1; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &bd,
+                        D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&shot_buf))) shot_buf = NULL;
+            else shot_size = total;
+        }
+        if (shot_buf) {
+            b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            b[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            cl->lpVtbl->ResourceBarrier(cl, 1, &b[1]);
+            D3D12_TEXTURE_COPY_LOCATION dst = {0}, src = {0};
+            dst.pResource = shot_buf; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = shot_fp;
+            src.pResource = s_sc_buf[bi]; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+            cl->lpVtbl->CopyTextureRegion(cl, &dst, 0, 0, 0, &src, NULL);
+            shot = 1;
+        } else fprintf(stderr, "[screenshot] FAILED: no readback buffer%c", 10);
+    }
     b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     b[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    b[1].Transition.StateBefore = shot ? D3D12_RESOURCE_STATE_COPY_SOURCE : D3D12_RESOURCE_STATE_RENDER_TARGET;
     b[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     cl->lpVtbl->ResourceBarrier(cl, 2, b);
     cl->lpVtbl->Close(cl);
@@ -1246,8 +1676,30 @@ static void present_blit(int vs)
     const u64 v = ++s_blit_ctr;
     s_d3d.cmd_queue->lpVtbl->Signal(s_d3d.cmd_queue, s_blit_fence, v);
     s_blit_fv[bi] = v;
-    s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, (UINT)vs,
-                                      (vs == 0 && s_tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    if (shot) {   /* one stall, only on the frame a screenshot is taken */
+        blit_wait(v);
+        void* p = NULL; D3D12_RANGE rr = { 0, (SIZE_T)shot_size };
+        PcShot* ps = (PcShot*)calloc(1, sizeof *ps);
+        const u32 w = shot_fp.Footprint.Width, h = shot_fp.Footprint.Height, pitch = shot_fp.Footprint.RowPitch;
+        if (ps && SUCCEEDED(shot_buf->lpVtbl->Map(shot_buf, 0, &rr, &p)) && p) {
+            ps->px = (u8*)malloc((size_t)pitch * h);
+            if (ps->px) { memcpy(ps->px, (u8*)p + shot_fp.Offset, (size_t)pitch * h);
+                          ps->w = w; ps->h = h; ps->pitch = pitch; }
+            D3D12_RANGE wr0 = { 0, 0 }; shot_buf->lpVtbl->Unmap(shot_buf, 0, &wr0);
+        }
+        HANDLE th = (ps && ps->px) ? CreateThread(NULL, 0, pc_shot_thread, ps, 0, NULL) : NULL;
+        if (th) CloseHandle(th);
+        else if (ps) { free(ps->px); free(ps); }
+    }
+    /* RFOM_PRESENT=notear: with vsync off, present without tearing (DXGI drops
+     * late frames instead, like mailbox). Default: tearing allowed, which is also
+     * what lets G-Sync / FreeSync follow the frame rate in a borderless window. */
+    { static int nt = -1;
+      if (nt < 0) { const char* e = getenv("RFOM_PRESENT");
+                    nt = e && (!_stricmp(e, "notear") || !_stricmp(e, "mailbox") || !_stricmp(e, "fifo")) ? 1 : 0;
+                    fprintf(stderr, "[D3D12] present: %s%c", vs ? "vsync" : (nt || !s_tearing) ? "no vsync, no tearing" : "no vsync, tearing allowed (VRR)", 10); }
+      s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, (UINT)vs,
+                                        (vs == 0 && s_tearing && !nt) ? DXGI_PRESENT_ALLOW_TEARING : 0); }
     s_vbb_index = (s_vbb_index + 1) % FRAME_COUNT;
 }
 
@@ -1884,7 +2336,26 @@ static int init_d3d12(u32 width, u32 height)
         if (aniso < 0) { const char* e = getenv("RSX_ANISO"); aniso = e ? atoi(e) : 0;
                          if (aniso > 16) aniso = 16;
                          if (aniso > 1) fprintf(stderr, "[D3D12] anisotropic filtering %dx%c", aniso, 10); }
+        /* Texture LOD bias. RSX_LOD_BIAS=<-2..2> sets it; unset/auto = log2 of
+         * the FSR/DLSS upscale ratio (-1 at Performance), the bias upscalers
+         * expect so textures keep output-resolution detail; 0 otherwise. */
+        static float lod_bias = 100.0f;
+        if (lod_bias > 99.0f) {
+            const char* e = getenv("RSX_LOD_BIAS");
+            if (e && *e && _stricmp(e, "auto")) lod_bias = (float)atof(e);
+            else {
+                const char* f = getenv("RSX_FSR"); const char* u = getenv("RSX_UPSCALE");
+                float up = u ? (float)atof(u) : 1.0f;
+                if (!(up > 0.0f) || up > 1.0f) up = 1.0f;
+                if (up < 0.33f) up = 0.33f;
+                lod_bias = (f && atoi(f) > 0 && up < 0.99f) ? log2f(up) : 0.0f;
+            }
+            if (lod_bias < -2.0f) lod_bias = -2.0f;
+            if (lod_bias > 2.0f) lod_bias = 2.0f;
+            if (lod_bias != 0.0f) fprintf(stderr, "[D3D12] texture LOD bias %.2f (RSX_LOD_BIAS)%c", (double)lod_bias, 10);
+        }
         for (int _s = 0; _s < RSX_UNITS; _s++) {
+            samp[_s].MipLODBias = lod_bias;
             samp[_s].Filter = aniso > 1 ? D3D12_FILTER_ANISOTROPIC : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
             samp[_s].MaxAnisotropy = aniso > 1 ? (UINT)aniso : 0;
             samp[_s].AddressU = samp[_s].AddressV = samp[_s].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -2046,9 +2517,9 @@ static int fence_wait_(u64 v, const char* who);
 static int fence_wait(u64 v, const char* who)
 {
     if (s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) >= v) return 1;
-    double _t = perf_on() ? perf_now() : 0.0;
+    double _t = perf_on() ? perf_now() : 0.0; const u64 _dpw = DP_T0();
     int r = fence_wait_(v, who);
-    if (perf_on()) s_perf_wait += perf_now() - _t;
+    DP_ADD(DP_WAIT, _dpw); if (perf_on()) s_perf_wait += perf_now() - _t;
     return r;
 }
 static int fence_wait_(u64 v, const char* who)
@@ -5231,6 +5702,57 @@ static void fe_keycap_rgba(u8* out, int S, const char* label)
     }
     SelectObject(dc, ob); DeleteObject(bm); DeleteDC(dc);
 }
+/* Xbox-style button picture, drawn here (original art, no bitmaps): a disc in
+ * the button's colour with its letter. Used for the menu atlas cells while an
+ * Xbox controller is the device used last (libs/input/cellPad.c). */
+static void fe_xbox_rgba(u8* out, int S, const char* letter, int cr, int cg, int cb)
+{
+    memset(out, 0, (size_t)S * S * 4);
+    HDC dc = CreateCompatibleDC(NULL);
+    BITMAPINFO bi; memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = S; bi.bmiHeader.biHeight = -S;
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = NULL;
+    HBITMAP bm = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+    if (!dc || !bm || !bits) { if (bm) DeleteObject(bm); if (dc) DeleteDC(dc); return; }
+    HGDIOBJ ob = SelectObject(dc, bm);
+    memset(bits, 0, (size_t)S * S * 4);
+    HFONT fo = CreateFontA(-(S * 30 / 44 > 4 ? S * 30 / 44 : 4), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS, 0,
+                           ANTIALIASED_QUALITY, 0, "Bahnschrift SemiBold");
+    HGDIOBJ of = fo ? SelectObject(dc, fo) : NULL;
+    SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(0, 255, 0));
+    RECT rc = { 0, 0, S, S };
+    DrawTextA(dc, letter, (int)strlen(letter), &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    GdiFlush();
+    const u8* px = (const u8*)bits;
+    const float c = S * 0.5f, R = S * 19.0f / 44.0f, rim = S >= 16 ? 1.6f : 0.8f;
+    const int dark_letter = (cr * 3 + cg * 6 + cb) > 1800;   /* yellow: dark letter */
+    const int lr = dark_letter ? 30 : 255, lg = dark_letter ? 30 : 255, lb = dark_letter ? 30 : 255;
+    for (int y = 0; y < S; y++) for (int x = 0; x < S; x++) {
+        const float dx = x + 0.5f - c, dy = y + 0.5f - c, d = sqrtf(dx * dx + dy * dy);
+        float cov = R - d + 0.5f; cov = cov < 0 ? 0 : cov > 1 ? 1 : cov;
+        const float edge = (d > R - rim) ? 0.55f : 1.0f;   /* darker rim */
+        const float L = px[(y * S + x) * 4 + 1] / 255.0f;
+        u8* o = out + (y * S + x) * 4;
+        o[0] = (u8)(cr * edge * (1 - L) + lr * L);
+        o[1] = (u8)(cg * edge * (1 - L) + lg * L);
+        o[2] = (u8)(cb * edge * (1 - L) + lb * L);
+        o[3] = (u8)(cov * 255.0f);
+    }
+    if (of) SelectObject(dc, of);
+    if (fo) DeleteObject(fo);
+    SelectObject(dc, ob); DeleteObject(bm); DeleteDC(dc);
+}
+/* The picture for menu atlas cell c (0 = Circle, 1 = Cross) for the current
+ * prompt device: keyboard "ESC" / space-bar sign, Xbox B / A discs. */
+static int s_fe_atlas_mode = 0; static u32 s_fe_atlas_off = 0;
+static void fe_cell_rgba(u8* out, int S, int c)
+{
+    if (s_fe_atlas_mode == 1) {
+        if (c == 0) fe_xbox_rgba(out, S, "B", 200, 40, 40);
+        else fe_xbox_rgba(out, S, "A", 50, 165, 50);
+    } else fe_keycap_rgba(out, S, c == 0 ? "ESC" : "SPACE");
+}
 static u16 fe_565(const u8* c) { return (u16)(((c[0] >> 3) << 11) | ((c[1] >> 2) << 5) | (c[2] >> 3)); }
 static void fe_bc3_block(u8* dst, const u8 px[16][4])
 {
@@ -5277,10 +5799,10 @@ static void fe_bc3_block(u8* dst, const u8 px[16][4])
  * menu actually samples at its icon size -- can be rebuilt from it. */
 static u8 s_fe_atlas[512 * 256 * 4]; static int s_fe_atlas_pending = 0;
 /* cell: 44x44 at (x0, y0), both multiples of 4 */
-static void fe_put_keycap(u8* map, u32 pitch, u32 x0, u32 y0, const char* label)
+static void fe_put_keycap(u8* map, u32 pitch, u32 x0, u32 y0, int cell)
 {
     static u8 img[44 * 44 * 4];
-    fe_keycap_rgba(img, 44, label);
+    fe_cell_rgba(img, 44, cell);
     for (u32 y = 0; y < 44; y++) memcpy(s_fe_atlas + ((y0 + y) * 512 + x0) * 4, img + y * 44 * 4, 44 * 4);
     for (u32 by = 0; by < 11; by++) for (u32 bx = 0; bx < 11; bx++) {
         u8 px[16][4];
@@ -5370,6 +5892,8 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
             && c->cube == cube) {
             c->last_use = ++s_tex_clock;
             if (c->used) return i;                /* already bound this frame */
+            { extern volatile int g_rfom_prompt_dev;   /* v200: menu icon atlas follows the prompt device */
+              if (s_fe_atlas_off && key_off == s_fe_atlas_off && s_fe_atlas_mode != g_rfom_prompt_dev) { slot = i; break; } }
             { static int nocache = -1;            /* TEX_NOCACHE=1: always re-upload */
               if (nocache < 0) { const char* e = getenv("TEX_NOCACHE");
                                  nocache = e ? atoi(e) : 0; }
@@ -5844,11 +6368,18 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
           u32 hsh = 2166136261u;
           for (u32 x = 0; x < w * h * 4; x++) { hsh ^= rgba[x]; hsh *= 16777619u; }
           { static int kc = -1; if (kc < 0) { const char* e = getenv("RSX_FE_KEYCAPS"); kc = e ? atoi(e) : 1; }   /* v160r: on again (drawn signs) */   /* v160p: icons untouched by default (hints are rewritten as words) */
+            extern volatile int g_rfom_prompt_dev;
             if (kc && hsh == 0xE82A7DC8u && w == 512 && h == 256 && tl.fmt == RSX_TEXFMT_BC3) {
-                memcpy(s_fe_atlas, rgba, sizeof s_fe_atlas); s_fe_atlas_pending = 1;
-                fe_put_keycap(_map0, pitch, 376, 12, "ESC");     /* Circle = back   */
-                fe_put_keycap(_map0, pitch, 464, 12, "SPACE");   /* Cross  = select */
-                static int said = 0; if (said < 3 && ++said) fprintf(stderr, "[keycaps] menu button pictures -> ESC / SPACE (%u mip levels, off 0x%08X)%c", nm, off, 10);
+                /* v200: follows the device used last; re-uploaded when it changes
+                 * (see the cache check in this function). PlayStation pad: untouched. */
+                s_fe_atlas_off = key_off; s_fe_atlas_mode = g_rfom_prompt_dev;
+                if (s_fe_atlas_mode != 2) {
+                    memcpy(s_fe_atlas, rgba, sizeof s_fe_atlas); s_fe_atlas_pending = 1;
+                    fe_put_keycap(_map0, pitch, 376, 12, 0);   /* Circle = back   */
+                    fe_put_keycap(_map0, pitch, 464, 12, 1);   /* Cross  = select */
+                }
+                static int said = 0; if (said < 6 && ++said) fprintf(stderr, "[keycaps] menu button pictures -> %s (%u mip levels, off 0x%08X)%c",
+                    s_fe_atlas_mode == 0 ? "ESC / SPACE" : s_fe_atlas_mode == 1 ? "Xbox B / A" : "PlayStation (original)", nm, off, 10);
             } }
           if (!fe) { static u32 lh[16]; static int nl = 0; int k = 0; for (; k < nl; k++) if (lh[k] == hsh) break;
                      if (k == nl && nl < 16) { lh[nl++] = hsh; fprintf(stderr, "[keycaps] game 512x256 BC3 atlas hash 0x%08X%s%c", hsh, hsh == 0xE82A7DC8u ? " (menu icons)" : "", 10); } }
@@ -6053,12 +6584,11 @@ static int vp_upload_tex_slot_impl(u32 off, u32 w, u32 h, u32 fmt, int cube, u32
             /* v160l: rebuild the key-cap cells in this level from the patched level 0 */
             if (s_fe_atlas_pending && dxt && lw >= 4 && lh >= 4) {
                 static const u32 cells[2][2] = { { 376, 12 }, { 464, 12 } };
-                static const char* const labels[2] = { "ESC", "SPACE" };
                 const u32 sc = 1u << L;
                 for (int c = 0; c < 2; c++) {
                     const int cs = (int)(44 / sc); static u8 capimg[44 * 44 * 4];
                     const u32 cx0 = cells[c][0] / sc, cy0 = cells[c][1] / sc;
-                    if (cs >= 6) fe_keycap_rgba(capimg, cs, labels[c]);
+                    if (cs >= 6) fe_cell_rgba(capimg, cs, c);
                     const u32 rx0 = (cells[c][0] / sc) & ~3u, ry0 = (cells[c][1] / sc) & ~3u;
                     u32 rx1 = ((cells[c][0] + 44 + sc - 1) / sc + 3) & ~3u, ry1 = ((cells[c][1] + 44 + sc - 1) / sc + 3) & ~3u;
                     if (rx1 > lw) rx1 = lw; if (ry1 > lh) ry1 = lh;
@@ -6212,7 +6742,39 @@ static void vs_attr_log(const rsx_state* st, int vs_idx, u32 fp)
 
 static u32 s_fpnat[256]; static int s_fpnat_n = 0;   /* v163: "noat" in logs\fpkill.txt = alpha test off for these FPs */
 static int fp_in(const u32* l, int n, u32 fp);
-static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+/* fp_k[] for a draw: the inline constants of its fragment program. Every draw
+ * re-walked and byte-swapped the ucode; most draws re-use a program whose
+ * bytes have not changed since the last walk. Memoised per ucode offset and
+ * validated with a memcmp of the whole program (constants included), so a
+ * re-patched constant is always picked up. FIFO thread only. RSX_FPK_MEMO=0 off. */
+#define FPK_MEMO_N 256
+#define FPK_MEMO_MAXB 1536
+typedef struct { u32 off, len; int n; u8 code[FPK_MEMO_MAXB]; float k[64 * 4]; } FpkMemo;
+static FpkMemo* s_fpk_memo;
+static void fp_consts_memo(const u8* vm, u32 foff, float* out)
+{
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("RSX_FPK_MEMO"); en = e ? atoi(e) : 1;
+                  if (en) s_fpk_memo = (FpkMemo*)calloc(FPK_MEMO_N, sizeof(FpkMemo));
+                  if (!s_fpk_memo) en = 0; }
+    const u8* p = vm + foff;
+    if (!en) { rsx_fp_extract_consts(p, 4096, out, 64); return; }
+    FpkMemo* m = &s_fpk_memo[((foff >> 4) * 2654435761u) >> 24];
+    if (m->off == foff + 1u && memcmp(p, m->code, m->len) == 0) {
+        if (m->n) memcpy(out, m->k, (size_t)m->n * 16);
+        return;
+    }
+    const u32 len = rsx_fp_program_size(p, 4096);
+    if (!len || len > FPK_MEMO_MAXB) { m->off = 0; rsx_fp_extract_consts(p, 4096, out, 64); return; }
+    float tmp[64 * 4];
+    const int n = rsx_fp_extract_consts(p, 4096, tmp, 64);
+    const int nn = n < 64 ? n : 64;
+    if (nn > 0) { memcpy(out, tmp, (size_t)nn * 16); memcpy(m->k, tmp, (size_t)nn * 16); }
+    memcpy(m->code, p, len);
+    m->len = len; m->n = nn > 0 ? nn : 0; m->off = foff + 1u;
+}
+
+static void vp_record_cb_impl(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
 {
     const rsx_state* st = s_d3d.current_rsx_state;
     if (!s_d3d.vp_cb_mapped || !st || slot >= MAX_DRAWS) return;
@@ -6278,7 +6840,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
             u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1,
                                              dr->fp_addr & ~0x3u);
             if (vm_base && foff != 0xFFFFFFFFu)
-                rsx_fp_extract_consts(vm_base + foff, 4096, &ts[20], 64);   /* fp_k[64] */
+                fp_consts_memo(vm_base, foff, &ts[20]);   /* fp_k[64] */
             /* FPK_DBG=1: the fragment constants as the shader will see them.
              * A program whose only output is fp_k[0].xxxx renders black if
              * those constants never arrive, which looks identical from the
@@ -6421,6 +6983,12 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
     /* v165: FSR -- history copy (un-jittered) + sub-pixel jitter for scene draws. */
     memcpy(dst + RSX_MAX_VERTEX_CONSTANTS * 16, vpx, sizeof vpx);
     if (dr) { if (fsr_mode()) fsr_record((D3D12DrawRecord*)dr, vs_idx, dst, (const char*)st->vertex_constants, vpx); else { ((D3D12DrawRecord*)dr)->fsr = 0; ((D3D12DrawRecord*)dr)->fsr_up = 0.0f; } }
+}
+static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+{
+    const u64 t = DP_T0();
+    vp_record_cb_impl(slot, vs_idx, dr);
+    DP_ADD(DP_REC_CB, t);
 }
 
 /* Which offscreen surface (if any) does the current RSX state render to?
@@ -7712,6 +8280,7 @@ static void gbc_transition(int i, D3D12_RESOURCE_STATES to)
 /* Replay side: render dr's window of its source surface into its copy texture. */
 static void gpu_blit_replay(const D3D12DrawRecord* dr)
 {
+    s_rs_epoch++;
     if (!gb_init()) return;
     const int gi = gbc_find(dr->bl_dst, dr->rt_w, dr->rt_h);
     if (gi < 0) return;
@@ -8058,7 +8627,8 @@ static __declspec(thread) int t_render_thread = 0;   /* 1 on the RSX_ASYNC rende
 #include "rsx_fsr.inc"   /* v165: AMD FSR 3.1 */
 static void render_frame_impl(void)
 {
-    double _rf0 = perf_on() ? perf_now() : 0.0;
+    double _rf0 = perf_on() ? perf_now() : 0.0; const u64 _dprf = DP_T0();
+    s_rf_gen++; s_rs_epoch++;
     u32 fi = s_d3d.frame_index;
     if (!t_render_thread) vp_async_drain();   /* queued vertex conversions land before anything reads them */
 
@@ -8373,7 +8943,7 @@ static void render_frame_impl(void)
      * animates so contents re-upload every frame) and pre-build its FP PSO.
      * A texture whose offset matches an offscreen RT samples the RT directly
      * (tex_slot 1000+idx) -- no guest-memory upload. */
-    double _pre0 = perf_on() ? perf_now() : 0.0;
+    double _pre0 = perf_on() ? perf_now() : 0.0; const u64 _dppre = DP_T0();
     for (int _i = 0; _i < VP_TEX_SLOTS; _i++) s_d3d.vp_tex[_i].used = 0;
     for (u32 _d = 0; _d < T_DRAWCNT && _d < MAX_DRAWS; _d++) {
         D3D12DrawRecord* dr = &T_DRAWS[_d];
@@ -8481,7 +9051,7 @@ static void render_frame_impl(void)
         /* Fill this draw's t0-t3 SRV window (DRAW_SRV_BASE + d*4): each unit
          * resolves to an offscreen RT (sampled directly), an uploaded guest
          * texture, or a null SRV. */
-        double _sv0 = perf_on() ? perf_now() : 0.0;
+        double _sv0 = perf_on() ? perf_now() : 0.0; const u64 _dpsv = DP_T0();
         const u32 _umask = fp_used_units(dr->fp_addr);
         static int s_reuse = -1;
         if (s_reuse < 0) { const char* e = getenv("RSX_SRV_REUSE"); s_reuse = e ? atoi(e) : 1; }
@@ -8717,12 +9287,12 @@ static void render_frame_impl(void)
                     case 0x9A: case 0x9B: case 0x9C: case 0x9F: _fmt_ok = 1; break;
                     }
                 if (dr->tex[_u].off && _fmt_ok) {
-                    double _tt = perf_on() ? perf_now() : 0.0;
+                    double _tt = perf_on() ? perf_now() : 0.0; const u64 _dptt = DP_T0();
                     int _cube = dr->tex[_u].cube && (dr_cube_mask(dr) & (1u << _u));
                     int ts = vp_upload_tex_slot(dr->tex[_u].off, dr->tex[_u].w,
                                                 dr->tex[_u].h, dr->tex[_u].fmt,
                                                 _cube, dr->tex[_u].mips, dr->tex[_u].pitch);
-                    if (perf_on()) { s_perf_tex += perf_now() - _tt; s_perf_ntex++;
+                    DP_ADD(DP_PRE_TEX, _dptt); if (perf_on()) { s_perf_tex += perf_now() - _tt; s_perf_ntex++;
                         s_perf_texbytes += (u64)dr->tex[_u].w * dr->tex[_u].h * 4u; }
                     /* Both forms of the offset are in hand here; the filters
                      * compare the BOUND one. */
@@ -8775,15 +9345,20 @@ static void render_frame_impl(void)
                 prev_batch = batch; prev_tbl = T_DRAWS;
             }
         }
-        if (perf_on()) s_perf_srv += perf_now() - _sv0;
-        double _ps0 = perf_on() ? perf_now() : 0.0;
+        DP_ADD(DP_PRE_SRV, _dpsv); if (perf_on()) s_perf_srv += perf_now() - _sv0;
+        double _ps0 = perf_on() ? perf_now() : 0.0; const u64 _dpps = DP_T0();
         if (dr->fp_addr) fp_set_unnorm(dr);
-        if (dr->fp_addr) vp_get_fp_pso(dr_vs_key(dr), dr->fp_addr, dr->blend_key,
+        if (dr->fp_addr) {
+            ID3D12PipelineState* pp = vp_get_fp_pso(dr_vs_key(dr), dr->fp_addr, dr->blend_key,
                                        dr_num_rts(dr),
                                        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
                                                   : DXGI_FORMAT_R8G8B8A8_UNORM,
                                        dr->fp_exp32, dr->cmask, dr->cull, dr_cube_mask(dr));
-        if (perf_on()) s_perf_pso += perf_now() - _ps0;
+            D3D12DrawRecord* wr = (D3D12DrawRecord*)dr;
+            wr->pso_pre = pp; wr->pso_pre_gen = s_rf_gen;
+            wr->pso_pre_bk = dr->blend_key; wr->pso_pre_cull = dr->cull;
+        }
+        DP_ADD(DP_PRE_PSO, _dpps); if (perf_on()) s_perf_pso += perf_now() - _ps0;
     }
 
     /* Transition render target to RENDER_TARGET state */
@@ -8804,7 +9379,7 @@ static void render_frame_impl(void)
     D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle;
     s_d3d.dsv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(s_d3d.dsv_heap, &dsv_handle);
 
-    if (perf_on()) s_perf_pre += perf_now() - _pre0;
+    DP_ADD(DP_PRE, _dppre); if (perf_on()) s_perf_pre += perf_now() - _pre0;
     /* Set render target + depth */
     s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, 1, &rtv_handle, FALSE, &dsv_handle);
 
@@ -9005,14 +9580,29 @@ static void render_frame_impl(void)
             int cur_zi = -1;                       /* its s_zt slot, -1 = not a zeta buffer */
             double _rec0 = perf_on() ? perf_now() : 0.0;
             int seen_small_vp = 0, captured = 0;
-            const int _p2 = perf_on();
+            const int _p2 = perf_on() || drawprof_on();
             u64 _cA = _p2 ? __rdtsc() : 0;
+            const u64 _dprp = DP_T0();
+            if (s_draw_filter < 0) { const char* e = getenv("RSX_DRAW_FILTER"); s_draw_filter = e ? atoi(e) : 1;
+                fprintf(stderr, "[draw] redundant state filter %s (RSX_DRAW_FILTER)%c", s_draw_filter ? "on" : "off", 10); }
+            /* Redundant-state filter: what the command list holds right now. */
+            u32 f_epoch = 0;
+            ID3D12PipelineState* f_pso = NULL;
+            D3D12_VIEWPORT f_vp; D3D12_RECT f_sc;
+            u64 f_tbl = 0, f_cb0 = 0, f_cb2 = 0; u32 f_sref = 0xFFFFFFFFu;
+            memset(&f_vp, 0, sizeof f_vp); memset(&f_sc, 0, sizeof f_sc);
+            int f_vp_ok = 0;
+            const u64 cb0_base = s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb)
+                               + (u64)T_PARITY * MAX_DRAWS * VP_CB_STRIDE;
+            const u64 cb2_base = s_d3d.vp_fpcb ? s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb)
+                                                 + (u64)T_PARITY * MAX_DRAWS * VP_FPCB_STRIDE : 0;
+            u64 _dpn = 0;
             for (u32 d = 0; d < T_DRAWCNT && d < MAX_DRAWS; d++) {
                 const D3D12DrawRecord* dr = &T_DRAWS[d];
                 if (!dr->is_vp) continue;
                 /* v189: GPU-side NV3089 copy; rebinds its own target, so the next op rebinds */
                 if (dr->is_blit) { gpu_blit_replay(dr); cur_rt = -3; continue; }
-                if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[3] += t - _cA; _cA = t; }   /* previous draw's call + tail */
+                if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[3] += t - _cA; if (s_dp_on > 0) s_dp[DP_RP_DRAW] += t - _cA; _cA = t; }   /* previous draw's call + tail */
                 /* The reduced-viewport passes (this title's reflection, drawn
                  * into a region of the same target) finish here -- snapshot
                  * before the full-screen scene overwrites them. */
@@ -9076,6 +9666,7 @@ static void render_frame_impl(void)
                 if (want != cur_rt || wantm[0] != cur_m[0] ||
                     wantm[1] != cur_m[1] || wantm[2] != cur_m[2] || want_zoff != cur_zoff) {
                     if (mv_seg >= 0) { fsr_mv_replay((u32)mv_seg, d, cur_dsv, s_fsr_slot); mv_seg = -1; }   /* v165 */
+                    s_rs_epoch++;
                     D3D12_CPU_DESCRIPTOR_HANDLE rh[4];
                     UINT nrt = 1;
                     rh[0] = rtv_handle;
@@ -9200,7 +9791,11 @@ static void render_frame_impl(void)
                     continue;
                 }
                 /* Resistance port: live draw filter (logs\\fpkill.txt). */
-                if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[0] += t - _cA; _cA = t; }
+                if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[0] += t - _cA; if (s_dp_on > 0) s_dp[DP_RP_RT] += t - _cA; _cA = t; }
+                if (f_epoch != s_rs_epoch || !s_draw_filter) {   /* state set elsewhere: forget it */
+                    f_epoch = s_rs_epoch; f_pso = NULL; f_vp_ok = 0;
+                    f_tbl = f_cb0 = f_cb2 = 0; f_sref = 0xFFFFFFFFu;
+                }
                 if (dr->fp_addr && fpkill_match(dr->fp_addr)) continue;
                 /* v189: the Auger's through-wall shimmer (fp 0x16764C1) refracts a copy
                  * of the screen around the round (unit 1, copied by NV3089 -- see
@@ -9216,23 +9811,30 @@ static void render_frame_impl(void)
                 if (dr->fp_addr && s_fpnd_n && fp_in(s_fpnd, s_fpnd_n, dr->fp_addr)) ((D3D12DrawRecord*)dr)->cull &= ~0x200u;
                 /* Per-draw pipeline: prefer the guest's own compiled FP; fall
                  * back to the hardcoded atlas/colour PS pair. */
-                fp_set_unnorm(dr);
-                ID3D12PipelineState* dpso =
-                    dr->fp_addr ? vp_get_fp_pso(dr_vs_key(dr), dr->fp_addr, dr->blend_key,
+                ID3D12PipelineState* dpso = NULL;
+                if (s_draw_filter && dr->fp_addr && dr->pso_pre && dr->pso_pre_gen == s_rf_gen &&
+                    dr->pso_pre_bk == dr->blend_key && dr->pso_pre_cull == dr->cull) {
+                    dpso = dr->pso_pre;   /* the pre-pass looked this exact key up */
+                    if (s_dp_on > 0) s_dp_pso_reuse++;
+                } else {
+                    fp_set_unnorm(dr);
+                    dpso = dr->fp_addr ? vp_get_fp_pso(dr_vs_key(dr), dr->fp_addr, dr->blend_key,
                                                 dr_num_rts(dr),
                                                 dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
                                                            : DXGI_FORMAT_R8G8B8A8_UNORM,
                                                 dr->fp_exp32, dr->cmask, dr->cull,
                                                 dr_cube_mask(dr)) : NULL;
+                }
                 /* Resistance port: a guest FP whose pipeline failed used to fall
                  * back to the built-in colour shader and drew a solid black
                  * shape. Skip it instead (RSX_FAILSKIP=0 restores). */
                 { static int fs = -1;
                   if (fs < 0) { const char* e = getenv("RSX_FAILSKIP"); fs = e ? atoi(e) : 1; }
                   if (fs && dr->fp_addr && !dpso) continue; }
-                s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
-                                                         dpso ? dpso : vpso);
-                if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[1] += t - _cA; _cA = t; }
+                { ID3D12PipelineState* np = dpso ? dpso : vpso;
+                  if (np != f_pso) { s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list, np); f_pso = np; }
+                  else if (s_dp_on > 0) s_dp_filt_pso++; }
+                if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[1] += t - _cA; if (s_dp_on > 0) s_dp[DP_RP_PSO] += t - _cA; _cA = t; }
                 /* Per-draw viewport: the guest rect when sane, else the
                  * full target. Scissor tracks the same rect. */
                 {
@@ -9263,8 +9865,11 @@ static void render_frame_impl(void)
                     D3D12_RECT dsc = {(LONG)(dvp.TopLeftX + 0.5f), (LONG)(dvp.TopLeftY + 0.5f),
                                       (LONG)(dvp.TopLeftX + dvp.Width + 0.5f),
                                       (LONG)(dvp.TopLeftY + dvp.Height + 0.5f)};
-                    s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &dvp);
-                    s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &dsc);
+                    if (!f_vp_ok || memcmp(&dvp, &f_vp, sizeof dvp) != 0 || memcmp(&dsc, &f_sc, sizeof dsc) != 0) {
+                        s_d3d.cmd_list->lpVtbl->RSSetViewports(s_d3d.cmd_list, 1, &dvp);
+                        s_d3d.cmd_list->lpVtbl->RSSetScissorRects(s_d3d.cmd_list, 1, &dsc);
+                        f_vp = dvp; f_sc = dsc; f_vp_ok = 1;
+                    } else if (s_dp_on > 0) s_dp_filt_state += 2;
                 }
                 /* Per-draw textures: bind this draw's t0-t3 SRV window.
                  * Any sampled offscreen RT transitions to PSR first (never
@@ -9291,15 +9896,17 @@ static void render_frame_impl(void)
                 }
                 D3D12_GPU_DESCRIPTOR_HANDLE gh = gh_base;
                 gh.ptr += (u64)(DRAW_SRV_BASE + ((u32)T_PARITY * MAX_DRAWS + dr->srv_win) * RSX_UNITS) * s_d3d.srv_inc;
-                s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
+                if (gh.ptr != f_tbl) { s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh); f_tbl = gh.ptr; }
+                else if (s_dp_on > 0) s_dp_filt_state++;
                 /* Per-draw constants: this draw's vp_cb + FP texscale slots. */
-                s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0,
-                    s_d3d.vp_cb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_cb)
-                    + ((u64)T_PARITY * MAX_DRAWS + dr->cb_slot) * VP_CB_STRIDE);
-                if (s_d3d.vp_fpcb)
-                    s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 2,
-                        s_d3d.vp_fpcb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_fpcb)
-                        + ((u64)T_PARITY * MAX_DRAWS + dr->cb_slot) * VP_FPCB_STRIDE);
+                { const u64 a0 = cb0_base + (u64)dr->cb_slot * VP_CB_STRIDE;
+                  if (a0 != f_cb0) { s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 0, a0); f_cb0 = a0; }
+                  else if (s_dp_on > 0) s_dp_filt_state++;
+                  if (cb2_base) {
+                      const u64 a2 = cb2_base + (u64)dr->cb_slot * VP_FPCB_STRIDE;
+                      if (a2 != f_cb2) { s_d3d.cmd_list->lpVtbl->SetGraphicsRootConstantBufferView(s_d3d.cmd_list, 2, a2); f_cb2 = a2; }
+                      else if (s_dp_on > 0) s_dp_filt_state++;
+                  } }
                 /* DRAWARGS=<N>: the arguments actually handed to the GPU, plus
                  * the target they are aimed at. A zero vertex count, or a start
                  * vertex past the buffer, rasterises nothing while every other
@@ -9335,8 +9942,10 @@ static void render_frame_impl(void)
                       s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(
                           s_d3d.cmd_list, bn, brh, FALSE, &cur_dsv);
                   } }
-                if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[2] += t - _cA; _cA = t; }
-                if (dr->cull >> 24) s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref);   /* v178 */
+                if (_p2) { const u64 t = __rdtsc(); s_rp_cyc[2] += t - _cA; if (s_dp_on > 0) s_dp[DP_RP_STATE] += t - _cA; _cA = t; }
+                if ((dr->cull >> 24) && dr->stencil_ref != f_sref) {   /* v178 */
+                    s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref); f_sref = dr->stencil_ref; }
+                _dpn++;
                 if (dr->ib_count && s_vp_ib)
                     s_d3d.cmd_list->lpVtbl->DrawIndexedInstanced(s_d3d.cmd_list,
                         dr->ib_count, 1, dr->ib_first, dr->gf ? 0 : (INT)(dr->vb_byte_offset / 256), 0);
@@ -9362,6 +9971,7 @@ static void render_frame_impl(void)
                             dr->cull, dr->blend, 10); } }
             }
             if (perf_on()) s_perf_gpu += perf_now() - _rec0;   /* reuse: record time */
+            if (s_dp_on > 0) { const u64 t = __rdtsc(); s_dp[DP_RP_DRAW] += t - _cA; s_dp[DP_RP] += t - _dprp; s_dp_records += _dpn; }
             if (mv_seg >= 0) { fsr_mv_replay((u32)mv_seg, T_DRAWCNT, cur_dsv, s_fsr_slot); mv_seg = -1; }   /* v165 */
             /* Leave the backbuffer bound for the dump/present epilogue. */
             if (cur_rt >= 0) {
@@ -9374,7 +9984,8 @@ static void render_frame_impl(void)
         }
     }
 
-    if (perf_on()) s_perf_rf += perf_now() - _rf0;
+    DP_ADD(DP_RF, _dprf); if (perf_on()) s_perf_rf += perf_now() - _rf0;
+    dp_report();
     /* MEMPEEK=<hex addr>:<n>: n big-endian floats at a guest address each frame,
      * with a min/max so a buffer of constants is distinguishable from real data. */
     { const char* mp = getenv("MEMPEEK");
@@ -9799,7 +10410,9 @@ skip_dump_consider: ;
       { extern volatile int g_rsx_cap_request;   /* v179: cellGcmSys, a movie just ended */
         if (!live_left && g_rsx_cap_request > 0) { live_left = (u32)g_rsx_cap_request; g_rsx_cap_request = 0;
             fprintf(stderr, "[RSXCAP] movie ended: capturing %u frames%c", live_left, 10); } }
-      if (!live_left && (GetAsyncKeyState(VK_F12) & 0x8000) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+      /* v200: F12 is the screenshot key; RSX_CAP_F12=1 brings back the rsxcap capture on it */
+      static int cap_f12 = -1; if (cap_f12 < 0) { const char* e = getenv("RSX_CAP_F12"); cap_f12 = e && atoi(e); }
+      if (cap_f12 && !live_left && (GetAsyncKeyState(VK_F12) & 0x8000) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
           live_left = 3;
           fprintf(stderr, "[RSXCAP] F12 capture requested%c", 10);
       }
@@ -9902,10 +10515,10 @@ skip_dump_consider: ;
       if (vs < 0) { const char* e = getenv("RSX_VSYNC"); vs = e ? atoi(e) : 0;
                     if (vs < 0) vs = 0; if (vs > 4) vs = 4;
                     if (vs) fprintf(stderr, "[D3D12] vsync on, sync interval %d%c", vs, 10); }
-      double _pt = perf_on() ? perf_now() : 0.0;
+      double _pt = perf_on() ? perf_now() : 0.0; const u64 _dpp = DP_T0();
       present_blit(vs);
       ft_note_present();
-      if (perf_on()) s_perf_present += perf_now() - _pt; }   /* skipped for an offscreen-only batch */
+      DP_ADD(DP_PRESENT, _dpp); if (perf_on()) s_perf_present += perf_now() - _pt; }   /* skipped for an offscreen-only batch */
 
     move_to_next_frame();
 
@@ -10860,9 +11473,10 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
         count = maxv - (maxv % 3); }
     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
         + (u64)T_PARITY * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
-    { double _tv = perf_on() ? perf_now() : 0.0;
+    { double _tv = perf_on() ? perf_now() : 0.0; const u64 _dpv = DP_T0();
       for (u32 k = 0; k < count; k++)
           read_vp_vertex(state, first + k, &out[k*16]);
+      DP_ADD(DP_REC_VTX, _dpv);
       if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_nverts += count; } }
     /* IDXDBG=<hex shader_program>: vertex range for that program's draws. */
     { static const char* ie = (const char*)1; static u32 iw = 0;
@@ -11138,8 +11752,9 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
         count = maxv - (maxv % 3); }
     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
         + (u64)T_PARITY * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
-    { double _tv = perf_on() ? perf_now() : 0.0;
+    { double _tv = perf_on() ? perf_now() : 0.0; const u64 _dpv = DP_T0();
       u32 nv = vp_indexed_fetch(state, first, count, out, maxv);
+      DP_ADD(DP_REC_VTX, _dpv);
       if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_nverts += count; }
       if (nv) { s_d3d.vp_vb_offset += nv * VP_VERT_STRIDE; return nv; } }
     /* IDXDBG=<hex shader_program>: index range for that program's draws. An
@@ -11984,6 +12599,26 @@ make_record:
     }
 }
 
+static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex);
+/* RSX_DRAWPROF: whole-call timing of the FIFO thread's draw / texture entry points. */
+static void dp_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+{
+    const u64 t = DP_T0();
+    d3d12_draw_arrays(ud, primitive, first, count);
+    if (s_dp_on > 0) { s_dp[DP_REC] += __rdtsc() - t; s_dp_guest_draws++; }
+}
+static void dp_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+{
+    const u64 t = DP_T0();
+    d3d12_draw_indexed(ud, primitive, first, count);
+    if (s_dp_on > 0) { s_dp[DP_REC] += __rdtsc() - t; s_dp_guest_draws++; }
+}
+static void dp_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
+{
+    const u64 t = DP_T0();
+    d3d12_bind_texture(ud, unit, tex);
+    if (s_dp_on > 0) { s_dp[DP_BIND] += __rdtsc() - t; s_dp_binds++; }
+}
 static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
 {
     (void)ud;
@@ -12305,9 +12940,9 @@ int rsx_d3d12_backend_init(u32 width, u32 height, const char* title)
     s_d3d12_backend.set_depth_stencil = d3d12_set_depth_stencil;
     s_d3d12_backend.set_shader        = d3d12_set_shader;
     s_d3d12_backend.set_vertex_attribs = d3d12_set_vertex_attribs;
-    s_d3d12_backend.draw_arrays       = d3d12_draw_arrays;
-    s_d3d12_backend.draw_indexed      = d3d12_draw_indexed;
-    s_d3d12_backend.bind_texture      = d3d12_bind_texture;
+    s_d3d12_backend.draw_arrays       = dp_draw_arrays;
+    s_d3d12_backend.draw_indexed      = dp_draw_indexed;
+    s_d3d12_backend.bind_texture      = dp_bind_texture;
 
     rsx_set_backend(&s_d3d12_backend);
 
@@ -12363,6 +12998,7 @@ int rsx_d3d12_backend_pump_messages(void)
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
+    pc_focus_update();
     return s_d3d.window_closed ? -1 : 0;
 }
 

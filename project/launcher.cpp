@@ -32,6 +32,9 @@ namespace Gdiplus { using std::min; using std::max; }
 #include <string>
 #include <vector>
 #include <functional>
+#include <shlobj.h>
+#include <knownfolders.h>
+#include "rfom_autoconfig.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "gdiplus.lib")
@@ -39,6 +42,7 @@ namespace Gdiplus { using std::min; using std::max; }
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "ole32.lib")
 #endif
 
 using namespace Gdiplus;
@@ -56,7 +60,11 @@ struct Setting {
     int sel;
 };
 
-enum { S_DISPLAY, S_WINDOW, S_FPS, S_VSYNC, S_RES, S_FSR, S_UPSCALE, S_ANISO, S_FILTER, S_SHARPEN, S_COUNT };
+enum { S_DISPLAY, S_WINDOW, S_FPS, S_VSYNC, S_RES, S_FSR, S_UPSCALE, S_ANISO, S_FILTER, S_SHARPEN,
+       S_MONITOR, S_FOCUS, S_MENUFPS, S_QUIT, S_SAVES, S_PADGLYPHS,
+       S_ASPECT, S_PRESENT, S_OVERLAY, S_MODS,
+       S_SENSY, S_ADS, S_AIMHOLD, S_DEADZONE, S_CURVE, S_COUNT };
+static const int S_INPUT_FIRST = S_SENSY;   // the Controls page's options (reset with the controls)
 static std::vector<Setting> g_set = {
     { "display", "Display mode",
       "Borderless fills the screen and lets you Alt+Tab instantly. Windowed uses the window size below. "
@@ -67,11 +75,12 @@ static std::vector<Setting> g_set = {
       { {"1280 x 720", "1280x720"}, {"1600 x 900", "1600x900"}, {"1920 x 1080", "1920x1080"},
         {"2560 x 1440", "2560x1440"}, {"3840 x 2160", "3840x2160"} }, 2 },
     { "fps", "Frame rate limit",
-      "60 is the tested default. Higher limits work, but the game logic then runs faster than it was ever "
-      "tested at, so some scripted moments may misbehave.",
-      { {"30  (PS3 original)", "30"}, {"55  (even on 165 Hz)", "55"}, {"60  (recommended)", "60"},
+      "The game runs at the same speed at any limit (each frame advances game time by the real time it "
+      "took). 60 is the most tested; 120 and above are smooth but some scripted moments are less tested. "
+      "The PS3 ran at 30.",
+      { {"30  (PS3 original)", "30"}, {"55  (even on 165 Hz)", "55"}, {"60", "60"},
         {"72", "72"}, {"82  (even on 165 Hz)", "82"}, {"90", "90"}, {"120", "120"},
-        {"144", "144"}, {"165", "165"}, {"Unlimited", "0"} }, 2 },
+        {"144", "144"}, {"165", "165"}, {"Just under refresh  (G-Sync / FreeSync)", "vrr"}, {"Unlimited", "0"} }, 2 },
     { "vsync", "VSync",
       "Off is smoothest with a FreeSync / G-Sync monitor. 'Every 3rd refresh' gives an even 55 fps on a 165 Hz screen.",
       { {"Off", "0"}, {"Every refresh", "1"}, {"Every 2nd refresh", "2"}, {"Every 3rd refresh", "3"} }, 0 },
@@ -81,10 +90,10 @@ static std::vector<Setting> g_set = {
       { {"1280 x 720  (PS3 original)", "1"}, {"1920 x 1080", "1.5"}, {"2560 x 1440", "2"},
         {"3200 x 1800", "2.5"}, {"3840 x 2160", "3"} }, 2 },
     { "fsr", "Anti-aliasing",
-      "AMD FSR 3.1 smooths jagged edges and shimmer, on any GPU. NVIDIA DLAA (DLSS at native resolution) "
-      "does the same with NVIDIA's AI model on GeForce RTX cards - sharper and steadier; it falls back to FSR "
-      "on other GPUs. Experimental: fast motion can ghost slightly.",
-      { {"Off  (PS3 original)", "0"}, {"AMD FSR 3.1", "1"}, {"NVIDIA DLAA (DLSS)", "2"} }, 0 },
+      "AMD FSR 3.1 smooths jagged edges and shimmer, on any GPU. NVIDIA DLSS (DLAA at native resolution) "
+      "does the same with NVIDIA's AI model on GeForce RTX cards - sharper and steadier. If DLSS can't start "
+      "(not an RTX card, old driver) the game uses FSR 3.1; if that fails too, plain scaling.",
+      { {"Off  (PS3 original)", "0"}, {"AMD FSR 3.1", "1"}, {"NVIDIA DLSS / DLAA", "2"} }, 0 },
     { "upscale", "Upscaling",
       "With FSR or DLSS on: draw the 3D scene at a lower resolution and let FSR / DLSS rebuild it at the "
       "render resolution. Faster, slightly softer. Native = no upscaling (DLAA / FSR native AA). "
@@ -103,7 +112,92 @@ static std::vector<Setting> g_set = {
       "Counteracts the softness of scaling and anti-aliasing. Off when the render resolution matches your "
       "screen and anti-aliasing is off.",
       { {"Off", "0"}, {"Low", "0.25"}, {"Medium", "0.5"}, {"High", "0.8"} }, 1 },
+    { "monitor", "Monitor",
+      "The screen the game opens on (borderless fullscreen fills that screen). Monitors are numbered in "
+      "Windows' order with the main display first.",
+      { {"Main display", "0"}, {"Monitor 2", "2"}, {"Monitor 3", "3"}, {"Monitor 4", "4"} }, 0 },
+    { "focus", "In the background",
+      "What happens when you Alt+Tab away or click another window. Pausing also frees the CPU and GPU for "
+      "the other program; the game picks up exactly where it was.",
+      { {"Pause and mute", "pause"}, {"Mute only", "mute"}, {"Keep running", "run"} }, 0 },
+    { "menufps", "Menu frame rate",
+      "Caps the frame rate while a menu (pause, options) is up over the game. Above about 90 fps the pause "
+      "menu's dimming layer can flicker.",
+      { {"30", "30"}, {"60", "60"}, {"90", "90"}, {"Same as the game", "0"} }, 2 },
+    { "quit", "Quit keys",
+      "F10, holding Esc for 1 second, or holding Start / Menu for 1.5 seconds asks \"Quit to desktop?\" "
+      "(Enter / A = yes, Esc / B = no). The game waits for a save in progress before it closes.",
+      { {"On", "1"}, {"Off  (Alt+F4 only)", "0"} }, 0 },
+    { "saves", "Save location",
+      "Saved Games keeps your progress outside the port's folder ("
+      "%USERPROFILE%\\Saved Games\\Resistance Fall of Man), so updating or reinstalling the port can't touch it. "
+      "Saves already in the game folder are copied there on the next start.",
+      { {"Saved Games folder", "savedgames"}, {"Game folder  (portable)", "portable"} }, 0 },
+    { "padglyphs", "Controller button prompts",
+      "Which button names the game shows while you play with a controller. Auto shows PlayStation symbols when a "
+      "DualShock / DualSense is plugged in and Xbox buttons otherwise. Keyboard and mouse always show your keys. "
+      "Also in the in-game PC menu (F10).",
+      { {"Auto", ""}, {"Xbox", "xbox"}, {"PlayStation", "ps"} }, 0 },
+    { "aspect", "Aspect ratio",
+      "Auto fills an ultrawide (21:9, 32:9) or 16:10 window: the 3D view gets wider (Hor+, the vertical view is "
+      "kept) instead of black bars. Movies and 2D screens stay 16:9. The HUD is stretched with the view. "
+      "On a 16:9 screen Auto changes nothing.",
+      { {"Auto  (window shape)", "auto"}, {"16:9  (PS3 original)", "off"}, {"16:10", "16:10"}, {"21:9", "21:9"},
+        {"32:9", "32:9"} }, 0 },
+    { "present", "Tearing",
+      "With VSync off: 'Allowed' presents immediately (lowest latency; with G-Sync / FreeSync the screen follows "
+      "the frame rate). 'Never' drops late frames instead of tearing.",
+      { {"Allowed  (lowest latency, VRR)", "tearing"}, {"Never", "notear"} }, 0 },
+    { "overlay", "Performance overlay",
+      "F3 shows the frame rate, frame time, draws per frame and the CPU time per draw in a corner of the game.",
+      { {"Off  (F3 shows it)", ""}, {"On at start  (F3 hides it)", "1"}, {"Disabled  (F3 does nothing)", "0"} }, 0 },
+    { "mods", "Mods folder",
+      "Loads replacement game files from the 'mods' folder: mods\\<Mod name>\\USRDIR\\<game file>. Mods load in "
+      "alphabetical order; a folder starting with _ or - is skipped. The log lists every file replaced.",
+      { {"Off", "0"}, {"On", "1"} }, 0 },
+    { "sensy", "Vertical sensitivity",
+      "Up/down mouse speed relative to left/right.",
+      { {"50%", "0.5"}, {"75%", "0.75"}, {"Same as horizontal", "1"}, {"125%", "1.25"}, {"150%", "1.5"}, {"200%", "2"} }, 2 },
+    { "ads", "Zoomed sensitivity",
+      "Extra mouse speed multiplier while zoomed or scoped (on top of the automatic zoom matching).",
+      { {"50%", "0.5"}, {"75%", "0.75"}, {"Same", "1"}, {"125%", "1.25"}, {"150%", "1.5"} }, 2 },
+    { "aimhold", "Zoom",
+      "Toggle: press to zoom, press again to stop (the game's own). Hold: zoomed while the zoom button / key is held.",
+      { {"Toggle  (PS3 original)", "0"}, {"Hold", "1"} }, 0 },
+    { "deadzone", "Stick deadzone",
+      "How far a controller stick must move before it counts. Raise it if the view drifts on its own.",
+      { {"Default  (24%, per axis)", ""}, {"5%", "0.05"}, {"10%", "0.1"}, {"15%", "0.15"}, {"20%", "0.2"},
+        {"25%", "0.25"}, {"30%", "0.3"} }, 0 },
+    { "curve", "Stick response",
+      "Linear: speed follows the stick directly. Precise: small movements are slower, for fine aiming. Fast: "
+      "small movements are quicker.",
+      { {"Linear  (default)", "1"}, {"Fast", "0.75"}, {"Precise", "1.5"}, {"Very precise", "2"} }, 0 },
 };
+
+// ---- hardware detection (rfom_autoconfig.h) ---------------------------------
+static rfac::Hardware g_hwinfo;
+static rfac::Settings g_rec;
+static bool g_first_run = false;
+static void detect_hardware()
+{
+    rfac::detect(g_hwinfo);
+    g_rec = rfac::recommend(g_hwinfo);
+}
+// the recommended value of a setting, or nullptr when it has none
+static const char* rec_value(int si)
+{
+    switch (si) {
+    case S_FPS: return g_rec.fps;
+    case S_VSYNC: return g_rec.vsync;
+    case S_RES: return g_rec.res;
+    case S_FSR: return g_rec.fsr;
+    case S_UPSCALE: return g_rec.upscale;
+    case S_ANISO: return g_rec.aniso;
+    case S_FILTER: return g_rec.filter;
+    case S_SHARPEN: return g_rec.sharpen;
+    default: return nullptr;
+    }
+}
 
 static char g_dir[MAX_PATH];
 static const int FOV_MIN = 60, FOV_MAX = 150, FOV_DEF = 82;   // 82 = the game's own view
@@ -116,7 +210,7 @@ static void load_settings()
     for (auto& s : g_set) s.sel = s.def;
     g_fov = FOV_DEF;
     FILE* f = fopen(path_of("settings.ini").c_str(), "r");
-    if (!f) return;
+    if (!f) { g_first_run = true; return; }
     char line[256];
     while (fgets(line, sizeof line, f)) {
         char* eq = strchr(line, '=');
@@ -155,6 +249,23 @@ static bool save_settings()
     fprintf(f, "set \"RSX_FSR=%s\"\n", val(S_FSR));
     fprintf(f, "set \"RSX_UPSCALE=%s\"\n", val(S_UPSCALE));
     fprintf(f, "set \"RFOM_FOV=%d\"\n", g_fov);
+    fprintf(f, "set \"RSX_MONITOR=%s\"\n", val(S_MONITOR));
+    fprintf(f, "set \"RSX_FOCUS_PAUSE=%d\"\n", !strcmp(val(S_FOCUS), "pause") ? 1 : 0);
+    fprintf(f, "set \"RSX_FOCUS_MUTE=%d\"\n", !strcmp(val(S_FOCUS), "run") ? 0 : 1);
+    fprintf(f, "set \"RFOM_MENU_FPS=%s\"\n", val(S_MENUFPS));
+    fprintf(f, "set \"RFOM_QUIT_PROMPT=%s\"\n", val(S_QUIT));
+    fprintf(f, "set \"RFOM_PAD_GLYPHS=%s\"\n", val(S_PADGLYPHS));
+    fprintf(f, "set \"RFOM_ASPECT=%s\"\n", val(S_ASPECT));
+    fprintf(f, "set \"RFOM_PRESENT=%s\"\n", val(S_PRESENT));
+    fprintf(f, "set \"RFOM_OVERLAY=%s\"\n", val(S_OVERLAY));
+    fprintf(f, "set \"RFOM_MODS=%s\"\n", val(S_MODS));
+    fprintf(f, "set \"PAD_MOUSE_SENS_Y=%s\"\n", val(S_SENSY));
+    fprintf(f, "set \"RFOM_ADS_SENS=%s\"\n", val(S_ADS));
+    fprintf(f, "set \"PAD_AIM_HOLD=%s\"\n", val(S_AIMHOLD));
+    fprintf(f, "set \"PAD_DEADZONE=%s\"\n", val(S_DEADZONE));
+    fprintf(f, "set \"PAD_CURVE=%s\"\n", !strcmp(val(S_CURVE), "1") ? "" : val(S_CURVE));
+    if (!strcmp(val(S_SAVES), "portable")) fprintf(f, "set \"RFOM_SAVE_DIR=portable\"\n");
+    else fprintf(f, "set \"RFOM_SAVE_DIR=\"\n");
     fclose(f);
     return true;
 }
@@ -470,7 +581,7 @@ static int g_drag = 0;                   // slider being dragged
 // toggles
 enum { TG_INVERT = 1 };
 // buttons
-enum { BT_RESET_CTL = 1, BT_RESET_GFX, BT_FOLDER, BT_LOGS, BT_WEB, BT_CONTROLS_TXT };
+enum { BT_RESET_CTL = 1, BT_RESET_GFX, BT_FOLDER, BT_LOGS, BT_WEB, BT_CONTROLS_TXT, BT_AUTO, BT_SAVES, BT_SHOTS };
 // key capture
 static int g_cap_a = -1, g_cap_k = -1;   // action/slot being captured (-2 = mouse release key)
 static std::wstring g_toast; static DWORD g_toast_until = 0;
@@ -485,7 +596,12 @@ static int dd_count(int kind, int idx)
 }
 static std::string dd_label(int kind, int idx, int i)
 {
-    if (kind == DD_SETTING) return g_set[idx].choices[i].label;
+    if (kind == DD_SETTING) {
+        const char* r = rec_value(idx);
+        std::string l = g_set[idx].choices[i].label;
+        if (r && !strcmp(r, g_set[idx].choices[i].value)) l += "  \xE2\x98\x85 recommended";
+        return l;
+    }
     if (kind == DD_PADINT) return g_padint_opts[i][1];
     return i == 0 ? "Direct  (recommended)" : "Classic  (stick emulation)";
 }
@@ -557,10 +673,13 @@ static void layout()
             deco(D_H2, RectF(x, y, w, SF(22)), "SCREEN"); y += SF(26);
             layout_setting_row(x, y, w, S_DISPLAY);
             layout_setting_row(x, y, w, S_WINDOW);
+            layout_setting_row(x, y, w, S_MONITOR);
             y += SF(18);
             deco(D_H2, RectF(x, y, w, SF(22)), "FRAME RATE"); y += SF(26);
             layout_setting_row(x, y, w, S_FPS);
+            layout_setting_row(x, y, w, S_MENUFPS);
             layout_setting_row(x, y, w, S_VSYNC);
+            layout_setting_row(x, y, w, S_PRESENT);
             y += SF(18);
             deco(D_H2, RectF(x, y, w, SF(22)), "VIEW"); y += SF(26);
             Widget& row = add(W_ROW, RectF(x - SF(12), y, w + SF(24), SF(ROWH)), -1);
@@ -571,7 +690,34 @@ static void layout()
             Widget& sl = add(W_SLIDER, RectF(x + w - SF(CTLW), y + SF(12), SF(CTLW), SF(ROWH - 24)), SL_FOV);
             sl.title = row.title; sl.help = row.help;
             y += SF(ROWH);
+            layout_setting_row(x, y, w, S_ASPECT);
+            y += SF(18);
+            deco(D_H2, RectF(x, y, w, SF(22)), "PC OPTIONS"); y += SF(26);
+            layout_setting_row(x, y, w, S_FOCUS);
+            layout_setting_row(x, y, w, S_QUIT);
+            layout_setting_row(x, y, w, S_SAVES);
+            layout_setting_row(x, y, w, S_PADGLYPHS);
+            layout_setting_row(x, y, w, S_OVERLAY);
+            layout_setting_row(x, y, w, S_MODS);
+            y += SF(26);
+            Widget& b = add(W_BUTTON, RectF(x, y, SF(210), SF(38)), BT_RESET_GFX);
+            b.title = "Reset to defaults"; b.help = "Puts every Display and Graphics setting back to its default.";
+            Widget& b2 = add(W_BUTTON, RectF(x + SF(222), y, SF(190), SF(38)), BT_SAVES);
+            b2.title = "Open save folder"; b2.help = "Opens the folder with your saved games (back it up from here).";
+            y += SF(38);
         } else {
+            {   // what was detected, and the button that applies it
+                char hw[300], st[200];
+                rfac::describe_hw(g_hwinfo, hw, sizeof hw);
+                rfac::describe(g_rec, st, sizeof st);
+                deco(D_NOTE, RectF(x, y, w, SF(40)), std::string("This PC: ") + hw + "\nRecommended: " + st);
+                y += SF(46);
+                Widget& b = add(W_BUTTON, RectF(x, y, SF(250), SF(38)), BT_AUTO);
+                b.title = "Auto-detect (recommended)";
+                b.help = "Sets resolution, anti-aliasing / upscaling, filtering and frame rate for this PC. "
+                         "RTX 4070 / 5070 class: the scene at 1080p, DLSS Performance to 4K (scaled to your screen).";
+                y += SF(38 + 24);
+            }
             deco(D_H2, RectF(x, y, w, SF(22)), "RESOLUTION"); y += SF(26);
             layout_setting_row(x, y, w, S_RES);
             layout_setting_row(x, y, w, S_FILTER);
@@ -583,7 +729,7 @@ static void layout()
             layout_setting_row(x, y, w, S_ANISO);
             y += SF(26);
             Widget& b = add(W_BUTTON, RectF(x, y, SF(210), SF(38)), BT_RESET_GFX);
-            b.title = "Restore default settings"; b.help = "Puts every Display and Graphics setting back to its default.";
+            b.title = "Reset to defaults"; b.help = "Puts every Display and Graphics setting back to its default.";
             y += SF(38);
         }
     } else if (g_page == P_CONTROLS) {
@@ -653,6 +799,9 @@ static void layout()
             Widget& kb = add(W_KEY, RectF(x + w - kw, y + SF(11), kw, SF(30)), -2, 0);
             kb.title = row.title; kb.help = row.help; y += SF(ROWH);
         }
+        layout_setting_row(x, y, w, S_SENSY);
+        layout_setting_row(x, y, w, S_ADS);
+        layout_setting_row(x, y, w, S_AIMHOLD);
         // controller
         y += SF(30);
         deco(D_H2, RectF(x, y, w, SF(22)), "CONTROLLER"); y += SF(28);
@@ -668,6 +817,8 @@ static void layout()
             Widget& d = add(W_DROP, RectF(x + w - SF(CTLW), y + SF(9), SF(CTLW), SF(ROWH - 18)), DD_PADINT);
             d.title = row.title; d.help = row.help; y += SF(ROWH);
         }
+        layout_setting_row(x, y, w, S_DEADZONE);
+        layout_setting_row(x, y, w, S_CURVE);
         y += SF(26);
         Widget& b = add(W_BUTTON, RectF(x, y, SF(210), SF(38)), BT_RESET_CTL);
         b.title = "Restore default controls"; b.help = "Puts every key, mouse and controller option back to its default.";
@@ -690,7 +841,9 @@ static void layout()
         static const char* keys[][2] = {
             { "Alt + Enter", "Switch between windowed and borderless" },
             { "F8", "Free / capture the mouse cursor (changeable on the Controls page)" },
-            { "F12", "Save a capture of the current frame (rsxcap folder) for bug reports" },
+            { "F12 / PrtScn", "Screenshot (PNG in the screenshots folder)" },
+            { "F3", "Performance overlay: fps, frame time, draws per frame, CPU time per draw" },
+            { "F10", "Quit to desktop (asks first). Also: hold Esc 1 s, or hold Start / Menu 1.5 s" },
         };
         for (auto& k : keys) {
             deco(D_LABEL, RectF(x, y, SF(130), SF(30)), k[0]);
@@ -705,6 +858,11 @@ static void layout()
         b2.title = "Open logs"; b2.help = "Log files from the last run. Attach logs\\run.log when reporting a bug.";
         Widget& b3 = add(W_BUTTON, RectF(x + SF(344), y, SF(170), SF(38)), BT_WEB);
         b3.title = "Project page"; b3.help = "github.com/Psyykosis/Resistance-Fall-of-Man-Recomp";
+        y += SF(50);
+        Widget& b4 = add(W_BUTTON, RectF(x, y, SF(170), SF(38)), BT_SAVES);
+        b4.title = "Open save folder"; b4.help = "Your saved games (see Display \xE2\x80\xBA Save location).";
+        Widget& b5 = add(W_BUTTON, RectF(x + SF(182), y, SF(170), SF(38)), BT_SHOTS);
+        b5.title = "Open screenshots"; b5.help = "Screenshots taken with F12 / PrtScn.";
         y += SF(38);
     }
     g_content_h = y + SF(40);
@@ -1013,11 +1171,37 @@ static void capture_done(const char* key)
     invalidate();
 }
 
+static void apply_recommended()
+{
+    for (int si = 0; si < S_COUNT; si++) {
+        const char* r = rec_value(si);
+        if (!r) continue;
+        for (size_t i = 0; i < g_set[si].choices.size(); i++)
+            if (!strcmp(g_set[si].choices[i].value, r)) g_set[si].sel = (int)i;
+    }
+    save_settings();
+}
 static void restore_graphics()
 {
-    for (auto& s : g_set) s.sel = s.def;
-    g_fov = FOV_DEF; save_settings();
-    toast("Display and Graphics settings restored to their defaults.");
+    for (int si = 0; si < S_INPUT_FIRST; si++) g_set[si].sel = g_set[si].def;
+    g_fov = FOV_DEF;
+    apply_recommended();   // the defaults ARE the recommended settings for this PC
+    toast("Display and Graphics settings restored to their defaults (recommended for this PC).");
+}
+static std::string saves_folder(bool* exists)
+{
+    std::string root;
+    if (!strcmp(val(S_SAVES), "portable")) root = path_of("gamedata");
+    else {
+        PWSTR sg = nullptr; char buf[MAX_PATH * 2] = "";
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_SavedGames, 0, NULL, &sg)) && sg)
+            WideCharToMultiByte(CP_ACP, 0, sg, -1, buf, sizeof buf, NULL, NULL);
+        if (sg) CoTaskMemFree(sg);
+        root = std::string(buf) + "\\Resistance Fall of Man";
+    }
+    const std::string sd = root + "\\dev_hdd0\\home\\00000001\\savedata";
+    *exists = GetFileAttributesA(sd.c_str()) != INVALID_FILE_ATTRIBUTES;
+    return *exists ? sd : root;
 }
 
 static void play()
@@ -1044,8 +1228,31 @@ static void click(int i, float x, float y)
     case W_BUTTON:
         if (w.id == BT_RESET_CTL) {
             if (MessageBoxA(g_hw, "Put every key, mouse and controller option back to its default?", "Controls",
-                            MB_YESNO | MB_ICONQUESTION) == IDYES) { ctl_defaults(); ctl_save(); toast("Controls restored to their defaults."); }
-        } else if (w.id == BT_RESET_GFX) restore_graphics();
+                            MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                ctl_defaults(); ctl_save();
+                for (int si = S_INPUT_FIRST; si < S_COUNT; si++) g_set[si].sel = g_set[si].def;
+                save_settings();
+                toast("Controls restored to their defaults."); }
+        } else if (w.id == BT_RESET_GFX) {
+            if (MessageBoxA(g_hw, "Put every Display and Graphics setting back to its default?", "Settings",
+                            MB_YESNO | MB_ICONQUESTION) == IDYES) restore_graphics();
+        } else if (w.id == BT_AUTO) {
+            apply_recommended();
+            char st[200]; rfac::describe(g_rec, st, sizeof st);
+            toast(std::string("Applied: ") + st);
+        } else if (w.id == BT_SAVES) {
+            bool ex = false; const std::string p = saves_folder(&ex);
+            if (!ex && strcmp(val(S_SAVES), "portable") &&
+                GetFileAttributesA(path_of("gamedata\\dev_hdd0\\home\\00000001\\savedata").c_str()) != INVALID_FILE_ATTRIBUTES) {
+                toast("Your saves move to Saved Games the next time the game starts; until then they are in the game folder.");
+                ShellExecuteA(g_hw, "open", path_of("gamedata\\dev_hdd0\\home\\00000001\\savedata").c_str(), NULL, NULL, SW_SHOWNORMAL);
+            } else {
+                SHCreateDirectoryExA(NULL, p.c_str(), NULL);
+                if (!ex) toast("No saves yet - this is where they will be.");
+                ShellExecuteA(g_hw, "open", p.c_str(), NULL, NULL, SW_SHOWNORMAL);
+            }
+        } else if (w.id == BT_SHOTS) { CreateDirectoryA(path_of("screenshots").c_str(), NULL);
+                                       ShellExecuteA(g_hw, "open", path_of("screenshots").c_str(), NULL, NULL, SW_SHOWNORMAL); }
         else if (w.id == BT_FOLDER) ShellExecuteA(g_hw, "open", g_dir, NULL, NULL, SW_SHOWNORMAL);
         else if (w.id == BT_LOGS) { CreateDirectoryA(path_of("logs").c_str(), NULL);
                                     ShellExecuteA(g_hw, "open", path_of("logs").c_str(), NULL, NULL, SW_SHOWNORMAL); }
@@ -1193,6 +1400,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmd, int show)
     GetModuleFileNameA(NULL, g_dir, MAX_PATH);
     if (char* sl = strrchr(g_dir, '\\')) *sl = 0;
     load_settings();
+    detect_hardware();
+    if (g_first_run) apply_recommended();   // first start: this PC's recommended settings
     ctl_load();
 
     GdiplusStartupInput gsi; GdiplusStartup(&g_gdip, &gsi, NULL);

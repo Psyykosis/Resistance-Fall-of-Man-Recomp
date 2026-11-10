@@ -93,7 +93,16 @@ static void fs_normalize_sep(char* p) {
  * only weak reference to it: under COFF each one emits its own fallback. */
 extern __attribute__((weak)) const char* cellGame_get_hdd_title_id(void);
 
+static void ps3_vfs_ps3game_fallback_impl(char* path, size_t cap);
+/* Port hook (project/rfom_mods.cpp, RFOM_MODS): may replace the resolved host
+ * path with a file from the mods folder. Runs after every translation. */
+void (*volatile g_vfs_override_hook)(char* path, size_t cap) = NULL;
 void ps3_vfs_ps3game_fallback(char* path, size_t cap)
+{
+    ps3_vfs_ps3game_fallback_impl(path, cap);
+    if (g_vfs_override_hook && path && *path) g_vfs_override_hook(path, cap);
+}
+static void ps3_vfs_ps3game_fallback_impl(char* path, size_t cap)
 {
     struct stat st;
     if (!path || !*path || stat(path, &st) == 0)

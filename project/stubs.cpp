@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <mutex>
 #include <algorithm>
 #include <unordered_map>
 
@@ -347,6 +348,7 @@ extern "C" int rfom_flagwait_timeout(const char* where)
 extern "C" uint64_t ppu_timebase_now(void);
 extern "C" void ppu_gcm_pump(void);
 extern "C" void cellGcm_set_waitflip_block(int on);
+extern "C" void* g_kbm_hwnd;           /* cellPad.c: the game window */
 static volatile int s_rf_mode = -2;    /* -2 unset, -1 original, else the fps target */
 static float s_rf_min = 1.0f / 60.0f;  /* min step (s) */
 static float s_rf_max = 0.0f;          /* max step floor (s), 0 = the game's own */
@@ -357,6 +359,20 @@ static void rfom_fps_init(void)
     const char* e = getenv("RFOM_FPS");
     if (e && *e) {
         if (!_stricmp(e, "orig") || !_stricmp(e, "original") || !_stricmp(e, "off")) m = -1;
+        else if (!_stricmp(e, "vrr")) {
+            /* VRR (G-Sync / FreeSync): just under the game monitor's refresh rate, so every
+             * frame stays inside the VRR range: hz - hz^2/3600 (144 -> 138, 165 -> 157). */
+            int hz = 0;
+            MONITORINFOEXW mi; mi.cbSize = sizeof mi;
+            DEVMODEW dm; memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+            HMONITOR mon = g_kbm_hwnd ? MonitorFromWindow((HWND)g_kbm_hwnd, MONITOR_DEFAULTTOPRIMARY) : NULL;
+            if (mon && GetMonitorInfoW(mon, &mi) && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)) hz = (int)dm.dmDisplayFrequency;
+            else if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm)) hz = (int)dm.dmDisplayFrequency;
+            if (hz < 30) hz = 60;
+            m = (int)(hz - (double)hz * hz / 3600.0);
+            if (m < 30) m = 30;
+            fprintf(stderr, "[fps] RFOM_FPS=vrr: %d Hz monitor -> %d fps cap\n", hz, m);
+        }
         else { m = atoi(e); if (m <= 0) m = 240; }
     }
     if (m > 0 && m < 30) m = 30;
@@ -410,8 +426,10 @@ extern "C" double rfom_limit_factor(double f)
 }
 /* The limiter's wait: until `target` timebase ticks have passed since the
  * previous flip's stamp (u64 at last_ea). 0 = run the game's own loop. */
+extern "C" void rfpf_frame_tick(void);   /* rfom_pcfeat.cpp: F3 overlay frame times */
 extern "C" int rfom_frame_wait(uint64_t target, uint32_t last_ea)
 {
+    rfpf_frame_tick();
     rfom_fps_init();
     if (s_rf_mode < 0) return 0;
     const uint64_t last = vm_read64(last_ea);
@@ -460,10 +478,100 @@ extern "C" int rfom_frame_wait(uint64_t target, uint32_t last_ea)
 #include <cmath>
 static volatile double g_rfom_game_fov = 82.0;   /* last FOV the game set (degrees, before widening) */
 extern "C" volatile double g_rfom_view_fov;   /* v190e: cellPad.c scope mode reads the player's FOV */
+static volatile double s_rfom_fov_live = -1.0;   /* the PC menu's FOV (degrees); -1 = RFOM_FOV */
+extern "C" void rfom_fov_set_live(double deg) { s_rfom_fov_live = deg > 0.0 ? deg : 82.0; }
+/* RFOM_ASPECT (ultrawide / Hor+): the camera setter func_000B674C takes the
+ * aspect in f4 and derives the vertical FOV and the frustum from the
+ * horizontal one. A 16:9 camera (aspect 1.70..1.86) is given the target
+ * aspect, and its horizontal FOV widened by the same ratio, so the vertical
+ * FOV stays and the sides open up (narrower targets, e.g. 16:10, keep the
+ * horizontal FOV and gain height). The game's own culling follows the frustum.
+ * The guest frame stays 16:9 in pixels; the D3D12 present stretches it to the
+ * target aspect (g_rsx_aspect_mul) while such a camera was set in the last
+ * 500 ms, so movies and 2D screens keep their 16:9 letterbox.
+ *   RFOM_ASPECT=auto (default): the game window's aspect | off | 21:9 | 32:9 | 2.39 ...
+ * The hook passes the aspect as a NEGATIVE argument to rfom_fov_adjust (the
+ * only per-call port function the lifted code declares there): it returns the
+ * new aspect negated and remembers the ratio for the FOV call that follows. */
+extern "C" volatile float g_rsx_aspect_mul;                 /* rsx_d3d12_backend.c */
+extern "C" volatile unsigned long long g_rsx_aspect_ms;
+static double rfom_fov_adjust_base(double f);
+static thread_local double tl_hp = 1.0;
+static thread_local int tl_hp_lod = 0;
+static double rfom_target_aspect(void)
+{
+    static int mode = -1;          /* 0 off, 1 auto, 2 fixed */
+    static double fixed = 0.0, cur = 0.0;
+    static ULONGLONG at = 0;
+    if (mode < 0) {
+        const char* e = getenv("RFOM_ASPECT");
+        mode = 1;
+        if (e && *e) {
+            double a = 0.0, b = 0.0;
+            if (!_stricmp(e, "off") || !strcmp(e, "0")) mode = 0;
+            else if (!_stricmp(e, "auto")) mode = 1;
+            else if (sscanf(e, "%lf:%lf", &a, &b) == 2 && a > 0.0 && b > 0.0) { mode = 2; fixed = a / b; }
+            else if ((a = atof(e)) > 0.0) { mode = 2; fixed = a; }
+        }
+        if (mode == 2 && (fixed < 1.2 || fixed > 4.0)) { fprintf(stderr, "[aspect] RFOM_ASPECT=%s out of range (1.2..4), off\n", e); mode = 0; }
+        fprintf(stderr, "[aspect] RFOM_ASPECT: %s\n", mode == 0 ? "off (16:9)" : mode == 1 ? "auto (window aspect)" : e);
+    }
+    if (mode == 0) return 0.0;
+    if (mode == 2) return fixed;
+    const ULONGLONG now = GetTickCount64();
+    if (now - at > 500) {
+        at = now;
+        RECT rc;
+        if (g_kbm_hwnd && GetClientRect((HWND)g_kbm_hwnd, &rc) && rc.right > 0 && rc.bottom > 0) {
+            double a = (double)rc.right / (double)rc.bottom;
+            if (a < 1.2) a = 1.2;
+            if (a > 4.0) a = 4.0;
+            if (fabs(a - cur) > 0.001) {
+                cur = a;
+                fprintf(stderr, "[aspect] window aspect %.3f (%ldx%ld)%s\n", a, rc.right, rc.bottom,
+                        fabs(a / (16.0 / 9.0) - 1.0) > 0.01 ? ": Hor+ on 16:9 cameras" : "");
+            }
+        }
+    }
+    return cur;
+}
 extern "C" double rfom_fov_adjust(double f)
 {
-    static double k = -1.0;
+    if (f < 0.0) {                 /* aspect query from the camera setter hook (see above) */
+        const double a = -f, t = rfom_target_aspect();
+        tl_hp = 1.0; tl_hp_lod = 0;
+        if (t > 0.0 && a > 1.70 && a < 1.86 && fabs(t / a - 1.0) > 0.01) {
+            tl_hp = t / a; tl_hp_lod = 1;
+            g_rsx_aspect_mul = (float)(t / a);
+            g_rsx_aspect_ms = GetTickCount64();
+            { static ULONGLONG t0 = 0; static unsigned n = 0; static int said = 0;   /* once: how often (should be every frame) */
+              if (said < 2) { if (!t0) t0 = g_rsx_aspect_ms; n++;
+                  if (!said) { said = 1; fprintf(stderr, "[aspect] Hor+: 16:9 camera (aspect %.3f) -> %.3f, horizontal FOV tan x%.3f%c", a, t, t / a, 10); }
+                  else if (g_rsx_aspect_ms - t0 >= 5000) { said = 2; fprintf(stderr, "[aspect] Hor+ camera set %.1f times/s%c", n * 1000.0 / (double)(g_rsx_aspect_ms - t0), 10); } } }
+            return -t;
+        }
+        return f;
+    }
+    const double hp = tl_hp;
+    tl_hp = 1.0;
+    double r = rfom_fov_adjust_base(f);
+    if (hp > 1.0 && r > 1.0 && r < 179.0) {
+        const double d2r = 3.14159265358979323846 / 180.0;
+        r = 2.0 * atan(tan(r * 0.5 * d2r) * hp) / d2r;
+        if (r > 170.0) r = 170.0;
+    }
+    return r;
+}
+static double rfom_fov_adjust_base(double f)
+{
+    static double k = -1.0, k_for = -2.0;
     const double base = 82.0, zoom = 65.0, d2r = 3.14159265358979323846 / 180.0;
+    const double live = s_rfom_fov_live;
+    if (live >= 0.0 && live != k_for) {              /* changed in the PC menu */
+        k_for = live;
+        k = (live >= 30.0 && live <= 160.0) ? tan(live * 0.5 * d2r) / tan(base * 0.5 * d2r) : 1.0;
+        fprintf(stderr, "[fov] horizontal FOV %.0f (PC menu)%c", live, 10);
+    }
     if (k < 0.0) {
         const char* e = getenv("RFOM_FOV");
         const double u = e ? atof(e) : 0.0;
@@ -508,7 +616,8 @@ extern "C" void rfom_fov_note(uint32_t cam, double f)
 extern "C" void rfom_fov_lod_fix(uint32_t cam, double f, double aspect)
 {
     if (!cam || !(aspect > 0.1)) return;
-    if (fabs(rfom_fov_adjust(f) - f) < 1e-9) return;   /* not widened */
+    const int hp = tl_hp_lod; tl_hp_lod = 0;
+    if (!hp && fabs(rfom_fov_adjust(f) - f) < 1e-9) return;   /* not widened */
     const double d2r = 3.14159265358979323846 / 180.0;
     const double t = tan(f * 0.5 * d2r);
     const float h = (float)(f * d2r), v = (float)(2.0 * atan(t / aspect));
@@ -673,6 +782,7 @@ extern "C" void rfom_jb_jump(ppu_context* ctx, uint32_t buf_ea)
  * The game's controller sensitivity (0-9) scales it too (rfom_ml_game_sens). */
 extern "C" volatile long g_ml_mode, g_kbm_ml_dx, g_kbm_ml_dy;
 extern "C" volatile double g_ml_deg_per_count;
+extern "C" volatile double g_ml_sens_y;   /* cellPad.c PAD_MOUSE_SENS_Y */
 extern "C" volatile int g_ml_invert_y, g_ml_fed_rx, g_ml_fed_ry, g_kbm_capture, g_ml_rs_keys;
 extern "C" volatile ULONGLONG g_ml_kbm_ms;
 extern "C" volatile uint32_t g_rfom_opts_ea;
@@ -999,6 +1109,11 @@ extern "C" void rfom_mouselook(uint32_t player)
           const double r = tan(fa * 0.5 * d2r) / tan(fb * 0.5 * d2r);
           if (r > 0.0 && r < 1.0) gs *= pow(r, zs);
       } }
+    /* RFOM_ADS_SENS=<0.1..3> (default 1): extra multiplier while zoomed / aiming
+     * (on top of RFOM_ZOOM_SENS's matching). */
+    { static double ads = -1.0; if (ads < 0.0) { const char* e = getenv("RFOM_ADS_SENS"); ads = e ? atof(e) : 1.0;
+                                                 if (!(ads >= 0.1)) ads = 1.0; if (ads > 3.0) ads = 3.0; }
+      if (ads != 1.0 && g_rfom_game_fov < 81.5 && g_rfom_game_fov > 1.0) gs *= ads; }
     const double k = g_ml_deg_per_count * gs * (3.14159265358979323846 / 180.0);
     if (dx) {
         double y = (double)ml_rdf(player + 868) + (double)s_ml_sx * (double)dx * k;
@@ -1007,7 +1122,12 @@ extern "C" void rfom_mouselook(uint32_t player)
         ml_wrf(player + 868, (float)y);
     }
     if (g_ml_invert_y) dy = -dy;
-    if (dy) ml_wrf(player + 864, (float)((double)ml_rdf(player + 864) + (double)s_ml_sy * (double)dy * k));
+    if (dy) ml_wrf(player + 864, (float)((double)ml_rdf(player + 864) + (double)s_ml_sy * (double)dy * k * g_ml_sens_y));
+}
+/* cellPad.c PAD_AIM_HOLD: the game is zoomed (scope / iron sights narrow the FOV it sets). */
+extern "C" int rfom_is_zoomed(void)
+{
+    return g_rfom_game_fov < 81.5 && g_rfom_game_fov > 1.0;
 }
 /* Resistance port (v152): on-screen button prompts for keyboard & mouse.
  * The game's text ("Press <glyph> to jump") marks buttons with private-use
@@ -1087,6 +1207,7 @@ static int pad_key_for(const char* pad, char out3[4], char outf[24])
 }
 extern "C" uint32_t ps3_hle_heap_alloc(uint32_t size);
 static char s_rep3[0x30][4], s_repf[0x30][24]; static int s_have[0x30];
+static int* s_havep = s_have;   /* the table glyph_at uses (keyboard or Xbox) */
 /* v153: the action glyph (Triangle) is "use" in nearly every prompt; it shows
  * the INTERACT key, except in text about melee, which shows the melee key. */
 static char s_melee3[4], s_meleef[24]; static int s_have_melee = 0;
@@ -1094,32 +1215,43 @@ static int glyph_at(const uint8_t* q)            /* index of a button glyph at q
 {
     if (q[0] != 0xE0 || q[1] != 0xA8 || q[2] < 0x80 || q[2] > 0xBF) return -1;
     const int k = 0x0A00 + (q[2] - 0x80) - 0x0A09;
-    return (k >= 0 && k < 0x30 && s_have[k]) ? k : -1;
+    return (k >= 0 && k < 0x30 && s_havep[k]) ? k : -1;
 }
 static inline uint32_t be32p(const uint8_t* q) { return (uint32_t)((q[0] << 24) | (q[1] << 16) | (q[2] << 8) | q[3]); }
 /* v160v: while a level loads and shows "Press the START button", Space also
  * presses Start (cellPad.c); cleared as soon as the player's look code runs,
  * so in play Space is only jump and never pauses. */
 extern "C" volatile int g_rfom_space_start;
-extern "C" void rfom_text_patch(uint32_t file_obj)
+/* Xbox names for the action glyphs: the same table as the keys (s_glyph_map),
+ * each PS3 button spelled as the Xbox button that the XInput mapping
+ * (libs/input/cellPad.c) puts on it: Cross = A, Circle = B, Square = X,
+ * Triangle = Y, L1/R1 = LB/RB, L2/R2 = LT/RT, L3/R3 = LS/RS, Start = Menu,
+ * Select = View. */
+static char s_xrep3[0x30][4], s_xrepf[0x30][24]; static int s_xhave[0x30];
+static void prompts_init_xbox(void)
 {
-    static int en = -1;
-    if (en < 0) { const char* e = getenv("RFOM_KEY_PROMPTS"); en = e ? atoi(e) : 1; }
-    if (!en || !file_obj) return;
-    int pad = 0;   /* controller: keep the PS3 icons, only reword the grapple line (v157) */
-    { XINPUT_STATE xs; if (XInputGetState(0, &xs) == ERROR_SUCCESS) pad = 1; }
-    const uint32_t base = vm_read32(file_obj + 4);
-    if (!base || vm_read32(base) != 0x49474857u) return;        /* "IGHW" */
-    const uint32_t n = vm_read32(base + 8);
-    if (n == 0 || n > 64) return;
-    uint32_t end = 0;
-    for (uint32_t i = 0; i < n; i++) {
-        const uint32_t off = vm_read32(base + 0x10 + 16 * i + 4), sz = vm_read32(base + 0x10 + 16 * i + 8) & 0xFFFFFFu;
-        if (off + sz > end) end = off + sz;
+    static const struct { const char* ps; const char* s3; const char* full; } x[] = {
+        {"CROSS","(A)","[A]"},{"CIRCLE","(B)","[B]"},{"SQUARE","(X)","[X]"},{"TRIANGLE","(Y)","[Y]"},
+        {"L1","LB ","[LB]"},{"R1","RB ","[RB]"},{"L2","LT ","[LT]"},{"R2","RT ","[RT]"},
+        {"L3","LS ","[LS]"},{"R3","RS ","[RS]"},{"START","Mnu","[Menu]"},{"SELECT","Vw ","[View]"},
+        {"DPAD_UP","DpU","[D-pad Up]"},{"DPAD_DOWN","DpD","[D-pad Down]"},
+        {"DPAD_LEFT","DpL","[D-pad Left]"},{"DPAD_RIGHT","DpR","[D-pad Right]"},
+    };
+    for (auto& g : s_glyph_map) {
+        const int i = g.cp - 0x0A00 - 0x09; if (i < 0 || i >= 0x30) continue;
+        const char *s3 = nullptr, *full = nullptr;
+        if (g.cp == 0x0A12) { s3 = "LS "; full = "Left Stick"; }
+        else if (g.cp == 0x0A16) { s3 = "RS "; full = "Right Stick"; }
+        else if (g.pad) for (auto& e : x) if (!strcmp(g.pad, e.ps)) { s3 = e.s3; full = e.full; break; }
+        if (!s3) continue;
+        memcpy(s_xrep3[i], s3, 4); snprintf(s_xrepf[i], 24, "%s", full); s_xhave[i] = 1;
     }
-    if (!end || end > (16u << 20)) return;
+}
+static void prompts_init(void)
+{
     static int init = 0;
     if (!init) { init = 1;
+        prompts_init_xbox();
         for (auto& g : s_glyph_map) { const int i = g.cp - 0x0A00 - 0x09; if (i < 0 || i >= 0x30) continue;
             if (g.fixed) { memcpy(s_rep3[i], g.fixed, 4); snprintf(s_repf[i], 24, "%s", g.full); s_have[i] = 1; }
             else if (g.cp == 0x0A1B) {
@@ -1138,6 +1270,27 @@ extern "C" void rfom_text_patch(uint32_t file_obj)
               memcpy(s_rep3[cx], "Spc", 4); snprintf(s_repf[cx], 24, "[Space]"); s_have[cx] = 1;
               memcpy(s_rep3[ci], "Esc", 4); snprintf(s_repf[ci], 24, "[Esc]"); s_have[ci] = 1;
           } } }
+}
+/* One text file as loaded (its original bytes) and as last patched, so the
+ * prompts can be redone for another device while it stays loaded. */
+struct PromptFile { uint32_t base, end, hash; int mode; std::vector<uint8_t> orig; uint32_t blk[3], blksz[3]; };
+static std::vector<PromptFile> s_pfiles;
+static std::mutex s_pfiles_mu;
+static uint32_t prompt_hash(const uint8_t* q, uint32_t n)
+{
+    uint32_t h = 2166136261u;
+    for (uint32_t i = 0; i < n; i++) { h ^= q[i]; h *= 16777619u; }
+    return h;
+}
+/* mode: 0 keyboard names, 1 Xbox names, 2 PlayStation (the game's own glyphs) */
+static void prompts_apply(uint32_t base, uint32_t end, int mode, uint32_t* blkp, uint32_t* blkszp, bool first)
+{
+    const uint32_t n = vm_read32(base + 8);
+    const int keep = mode == 2;   /* PlayStation pad: the game's own button glyphs */
+    char (*rep3)[4] = mode == 1 ? s_xrep3 : s_rep3;
+    char (*repf)[24] = mode == 1 ? s_xrepf : s_repf;
+    const char* meleef = mode == 1 ? s_xrepf[0x0A1B - 0x0A09] : s_meleef;
+    s_havep = mode == 1 ? s_xhave : s_have;
     extern uint8_t* vm_base;
     uint8_t* p = vm_base + base;
     int moved = 0;
@@ -1152,7 +1305,7 @@ extern "C" void rfom_text_patch(uint32_t file_obj)
     uint32_t nrefs = 0;
     std::vector<uint32_t> starts;                           /* strings to rewrite */
     std::vector<const char*> isgrab;   /* replacement text, or 0 (v160n) */
-    for (uint32_t i = 0; !pad && i + 2 < end; i++) {        /* strings with a glyph */
+    for (uint32_t i = 0; !keep && i + 2 < end; i++) {       /* strings with a glyph */
         if (glyph_at(p + i) < 0) continue;
         uint32_t st = i; while (st > 0 && p[st - 1] && i - st < 4096) st--;
         if (st == 0 || p[st - 1]) { i += 2; continue; }
@@ -1160,7 +1313,7 @@ extern "C" void rfom_text_patch(uint32_t file_obj)
         while (i < end && p[i]) i++;
     }
     /* v154: the "shake both sticks to break free" text -> a mouse version */
-    const char* const kGrabText = pad ? "Rapidly move both sticks to break a Chimeran grapple."
+    const char* const kGrabText = mode ? "Rapidly move both sticks to break a Chimeran grapple."
                                       : "Shake the mouse to break a Chimeran grapple.";
     static int grab_en = -1;
     if (grab_en < 0) { const char* e = getenv("RFOM_GRAB_PROMPT"); grab_en = e ? atoi(e) : 1; }
@@ -1170,25 +1323,26 @@ extern "C" void rfom_text_patch(uint32_t file_obj)
     if (fe_menu < 0) { char mp[MAX_PATH] = ""; GetModuleFileNameA(NULL, mp, MAX_PATH);
         const char* b = strrchr(mp, '\\'); b = b ? b + 1 : mp; const char* e = getenv("RSX_FE_KEYCAPS");
         fe_menu = (!_stricmp(b, "ResistanceFoM.exe") && e && atoi(e) == 3) ? 1 : 0; }   /* v160p: off -- menus use Anark scene strings */
-    /* v160v: "Press the START button" (level intro card): on keyboard it's Space */
-    for (uint32_t i = 1; !pad && i < end; i++) {
+    /* v160v: "Press the START button" (level intro card): on keyboard it's Space,
+     * on an Xbox pad the Menu button */
+    for (uint32_t i = 1; mode != 2 && i < end; i++) {
         if (p[i - 1] != 0 || p[i] == 0) continue;
         uint32_t m = 0; while (i + m < end && p[i + m] && m < 64) m++;
         const char* r = nullptr;
-        if (m == 22 && !memcmp(p + i, "Press the START button", 22)) r = "Press the SPACE bar";
-        else if (m == 34 && !memcmp(p + i, "Press the START button to continue", 34)) r = "Press the SPACE bar to continue";
-        else if (m == 35 && !memcmp(p + i, " Press the START button to continue", 35)) r = " Press the SPACE bar to continue";
+        if (m == 22 && !memcmp(p + i, "Press the START button", 22)) r = mode ? "Press the MENU button" : "Press the SPACE bar";
+        else if (m == 34 && !memcmp(p + i, "Press the START button to continue", 34)) r = mode ? "Press the MENU button to continue" : "Press the SPACE bar to continue";
+        else if (m == 35 && !memcmp(p + i, " Press the START button to continue", 35)) r = mode ? " Press the MENU button to continue" : " Press the SPACE bar to continue";
         if (r) { size_t si = 0; while (si < starts.size() && starts[si] != i) si++;
                  if (si == starts.size()) { starts.push_back(i); isgrab.push_back(r); } else isgrab[si] = r; }
         i += m;
     }
-    { char mp[MAX_PATH] = ""; GetModuleFileNameA(NULL, mp, MAX_PATH);   /* a level is loading: Space = Start until the player moves */
+    if (first) { char mp[MAX_PATH] = ""; GetModuleFileNameA(NULL, mp, MAX_PATH);   /* a level is loading: Space = Start until the player moves */
       const char* b = strrchr(mp, '\\'); b = b ? b + 1 : mp;
       /* v162b: not when the pause menu loads its text (play was running a moment ago) -- Space there is Cross */
       const ULONGLONG t = GetTickCount64();
       if (_stricmp(b, "ResistanceFoM.exe") && (!g_rfom_play_ms || t - g_rfom_play_ms > 3000)) g_rfom_space_start = 1;
       else if (_stricmp(b, "ResistanceFoM.exe")) g_rfom_pause_ui = 1; }   /* v162c: text loaded mid-play = the pause menu */
-    for (uint32_t i = 1; fe_menu && !pad && i < end; i++) {
+    for (uint32_t i = 1; fe_menu && mode == 0 && i < end; i++) {
         if (p[i - 1] != 0 || p[i] == 0) continue;
         uint32_t m = 0; while (i + m < end && p[i + m] && m < 64) m++;
         const char* r = nullptr;
@@ -1222,7 +1376,7 @@ extern "C" void rfom_text_patch(uint32_t file_obj)
         i += m;
     }
     { static int logged_files = 0;                          /* what was found, for checking */
-      if (!starts.empty() && logged_files++ < 12) {
+      if (first && !starts.empty() && logged_files++ < 12) {
         char pfn[MAX_PATH + 32]; { char mp[MAX_PATH] = ""; GetModuleFileNameA(NULL, mp, MAX_PATH);
           const char* b = strrchr(mp, '\\'); b = b ? b + 1 : mp; snprintf(pfn, sizeof pfn, "logs\\prompts_%s.txt", b); }
         if (FILE* f = fopen(pfn, logged_files == 1 ? "w" : "a")) {
@@ -1274,12 +1428,16 @@ extern "C" void rfom_text_patch(uint32_t file_obj)
                 if (isgrab[r.si]) { out += isgrab[r.si]; out += '\0'; continue; }
                 for (size_t i = 0; i < m; i++) {
                     const int k = (i + 2 < m) ? glyph_at(p + o + i) : -1;
-                    if (k == 0x0A1B - 0x0A09 && melee) { out += s_meleef; i += 2; }
-                    else if (k >= 0) { out += s_repf[k]; i += 2; } else out += (char)p[o + i];
+                    if (k == 0x0A1B - 0x0A09 && melee) { out += meleef; i += 2; }
+                    else if (k >= 0) { out += repf[k]; i += 2; } else out += (char)p[o + i];
                 }
                 out += '\0';
             }
-            const uint32_t blk = ps3_hle_heap_alloc((uint32_t)out.size() + 16);
+            uint32_t blk = blkp[mode];   /* one block per file and device, reused on every switch */
+            if (!blk || blkszp[mode] < (uint32_t)out.size() + 16) {
+                blk = ps3_hle_heap_alloc((uint32_t)out.size() + 16);
+                blkp[mode] = blk; blkszp[mode] = blk ? (uint32_t)out.size() + 16 : 0;
+            }
             if (blk) {
                 memcpy(vm_base + blk, out.data(), out.size());
                 for (auto& r : refs) vm_write32(base + r.pos, blk + at[r.si] - base - r.rel);
@@ -1300,15 +1458,76 @@ extern "C" void rfom_text_patch(uint32_t file_obj)
         if (m >= strlen(isgrab[si])) { memcpy(p + o, isgrab[si], strlen(isgrab[si]) + 1); }
     }
     int done = 0;
-    for (uint32_t i = 0; !pad && i + 2 < end; i++) {
+    for (uint32_t i = 0; !keep && i + 2 < end; i++) {
         const int k = glyph_at(p + i);
         if (k < 0) continue;
-        memcpy(p + i, s_rep3[k], 3); i += 2; done++;
+        memcpy(p + i, rep3[k], 3); i += 2; done++;
     }
     static int logged = 0;
     if ((done || moved) && logged++ < 8)
-        fprintf(stderr, "[prompts] text file 0x%08X: %d string(s) with full key names (%u reference(s)), %d icon(s) as short names%c",
-                base, moved, nrefs, done, 10);
+        fprintf(stderr, "[prompts] text file 0x%08X (%s): %d string(s) with full names (%u reference(s)), %d icon(s) as short names%c",
+                base, mode == 0 ? "keyboard" : "Xbox", moved, nrefs, done, 10);
+}
+extern "C" volatile int g_rfom_prompt_dev;
+extern "C" volatile long g_rfom_prompt_gen;
+extern "C" void (*volatile g_rfom_prompt_tick)(void);
+/* Hot-swap (runs on the game thread, from cellPadGetData): when the device
+ * used last changes, each text file still loaded and untouched since it was
+ * patched gets its original bytes back and is patched for the new device. */
+static void rfom_prompts_tick(void)
+{
+    static long seen = 0;
+    const long gen = g_rfom_prompt_gen;
+    if (gen == seen) return;
+    std::lock_guard<std::mutex> lk(s_pfiles_mu);
+    seen = gen;
+    const int mode = g_rfom_prompt_dev;
+    extern uint8_t* vm_base;
+    int redone = 0;
+    for (size_t i = 0; i < s_pfiles.size();) {
+        PromptFile& f = s_pfiles[i];
+        uint8_t* p = vm_base + f.base;
+        if (vm_read32(f.base) != 0x49474857u || prompt_hash(p, f.end) != f.hash) {   /* unloaded / reused */
+            s_pfiles.erase(s_pfiles.begin() + i); continue;
+        }
+        if (f.mode != mode) {
+            memcpy(p, f.orig.data(), f.end);
+            prompts_apply(f.base, f.end, mode, f.blk, f.blksz, false);
+            f.mode = mode; f.hash = prompt_hash(p, f.end); redone++;
+        }
+        i++;
+    }
+    if (redone) fprintf(stderr, "[prompts] %d loaded text file(s) switched to %s prompts%c", redone,
+                        mode == 0 ? "keyboard" : mode == 1 ? "Xbox" : "PlayStation", 10);
+}
+extern "C" void rfom_text_patch(uint32_t file_obj)
+{
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("RFOM_KEY_PROMPTS"); en = e ? atoi(e) : 1; }
+    if (!en || !file_obj) return;
+    if (!g_rfom_prompt_tick) g_rfom_prompt_tick = rfom_prompts_tick;
+    const uint32_t base = vm_read32(file_obj + 4);
+    if (!base || vm_read32(base) != 0x49474857u) return;        /* "IGHW" */
+    const uint32_t n = vm_read32(base + 8);
+    if (n == 0 || n > 64) return;
+    uint32_t end = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t off = vm_read32(base + 0x10 + 16 * i + 4), sz = vm_read32(base + 0x10 + 16 * i + 8) & 0xFFFFFFu;
+        if (off + sz > end) end = off + sz;
+    }
+    if (!end || end > (16u << 20)) return;
+    prompts_init();
+    std::lock_guard<std::mutex> lk(s_pfiles_mu);
+    extern uint8_t* vm_base;
+    for (size_t i = 0; i < s_pfiles.size(); i++)
+        if (s_pfiles[i].base == base) { s_pfiles.erase(s_pfiles.begin() + i); break; }
+    PromptFile f; f.base = base; f.end = end; f.mode = g_rfom_prompt_dev;
+    f.orig.assign(vm_base + base, vm_base + base + end);
+    memset(f.blk, 0, sizeof f.blk); memset(f.blksz, 0, sizeof f.blksz);
+    prompts_apply(base, end, f.mode, f.blk, f.blksz, true);
+    f.hash = prompt_hash(vm_base + base, end);
+    if (s_pfiles.size() >= 64) s_pfiles.erase(s_pfiles.begin());
+    s_pfiles.push_back(std::move(f));
 }
 /* Resistance port (v153): separate melee and interact.
  * The game's "use" checks -- func_00296EBC (switches, doors, turrets...: claims

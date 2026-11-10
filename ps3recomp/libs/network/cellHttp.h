@@ -30,6 +30,10 @@ extern "C" {
 #define CELL_HTTP_ERROR_INVALID_URL             0x8071010B
 #define CELL_HTTP_ERROR_ABORTED                 0x8071010C
 #define CELL_HTTP_ERROR_UNKNOWN                 0x807101FF
+#define CELL_HTTP_ERROR_BAD_CLIENT              0x80710010
+#define CELL_HTTP_ERROR_NO_CONNECTION           0x80710012
+#define CELL_HTTP_ERROR_NET_SELECT              0x80710800
+#define CELL_HTTP_ERROR_NET_SELECT_TIMEOUT      0x80710093
 /* "No Content-Length" from cellHttpResponseGetContentLength. The value is the
  * one titles compare the result with before reading the body to the end; the
  * SDK's own name for it is not confirmed here. */
@@ -122,6 +126,7 @@ s32 cellHttpSetRequestContentLength(CellHttpTransId transId, u64 length);
 s32 cellHttpAddRequestHeader(CellHttpTransId transId, const char* name,
                              const char* value);
 s32 cellHttpAbortTransaction(CellHttpTransId transId);
+s32 cellHttpClientPollConnections(CellHttpClientId clientId, CellHttpTransId* transId, s64 usec);
 
 #ifdef __cplusplus
 }

@@ -799,6 +799,7 @@ static void fsr_mv_replay(u32 d0, u32 d1, D3D12_CPU_DESCRIPTOR_HANDLE dsv, int r
         s_fsr_mv_started = 1;
     }
     if (s_fsr_ab == 4) return;   /* v184 diag: no motion / depth data (cleared: still, far) */
+    s_rs_epoch++;   /* root signature and pipeline change: the replay's state filter must rebind */
     cl->lpVtbl->OMSetRenderTargets(cl, 3, rh, FALSE, &dsv);
     cl->lpVtbl->SetGraphicsRootSignature(cl, s_mv_rs);
     if (s_gf_buf)
@@ -998,6 +999,7 @@ void fsr_cap_dump(const char* dir, u32 fi, u32 nd)
 /* Run FSR on the finished scene surface and copy the result back over it. */
 static void fsr_dispatch(void)
 {
+    s_rs_epoch++;
     { static int hw = 0; const int hd = (GetAsyncKeyState(VK_HOME) & 0x8000) != 0;
       if (hd && !hw) {
           s_fsr_ab = (s_fsr_ab + 1) % 6;
