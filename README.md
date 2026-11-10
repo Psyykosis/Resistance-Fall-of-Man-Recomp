@@ -1,35 +1,45 @@
-# Resistance: Fall of Man — native PC port/recomp (95% finished)
+# Resistance: Fall of Man: native PC port
 
-A static recompilation of the PS3 game *Resistance: Fall of Man* into a native Windows program. No emulation: the game's PowerPC and SPU code is translated to C/C++ and compiled for your PC, with a Direct3D 12 renderer, keyboard and mouse controls, and higher resolutions.
+A static recompilation of the PS3 game *Resistance: Fall of Man* into a native Windows program. Nothing is emulated: the game's PowerPC and SPU code is translated to C/C++ and compiled for your PC. It renders through its own Direct3D 12 renderer, with NVIDIA DLSS / DLAA and AMD FSR 3.1.
 
-> ⚠️ **Not Perfect.** I myself have only tested it **on my pc** (Ryzen 5 3600, Radeon RX 6700 XT, 32 GB RAM, Windows 11) haven't beat the game, but gotten up to Cheddar Gorge. To my knowledge no one has gotten past there yet, so things could go wrong after. Some crashes may happen but should be few and far between.
+> **This repository contains no game files and no game code.** You need your own copy of the game. Setup builds everything game-specific on your PC from that copy.
 
-> **This repository contains no game files and no game code.** You need your own copy of the game. The setup builds everything game-specific on your PC from that copy.
+## Highlights
+
+- **60 fps and higher** (30 to 165, *Just under refresh* for G-Sync / FreeSync, or unlimited). Game speed is correct at every frame rate.
+- **NVIDIA DLSS / DLAA and AMD FSR 3.1**, render resolutions up to 4K, and a *1080p → DLSS 4K* preset for RTX 40 / 50 cards.
+- **Native PC controls:** raw mouse look (not stick emulation), rebindable keys, and separate melee and interact keys. Xbox and PlayStation controllers work and can be swapped at any time.
+- **Button prompts follow your device:** your keyboard keys, or Xbox buttons when an Xbox controller is in use.
+- **In-game PC menu** (F10, or hold Esc / Start): Resume, PC Options, and **Quit to Desktop** with a confirmation. No Alt+F4 needed.
+- **Ultrawide (Hor+)**, field of view slider, performance overlay (F3), screenshots (F12), mods folder, and saves in *Saved Games*.
+- **Launcher** that detects your hardware and picks recommended settings.
+- **Performance work:** the renderer was profiled down to about 5 µs of CPU per draw (see *Performance*).
 
 ## What you need
 
 - A PC running Windows 10 or 11 (64-bit).
-- A CPU with AVX2: so basically Intel 4th gen or newer, or any AMD Ryzen. Older CPUs without AVX2 won't run it. If your CPU is from the last 10-15 years it'll work.
-- A DirectX 12 GPU. Only been tested on my AMD GPU so far; I don't see why NVIDIA or Intel GPUs wouldn't work, but nobody has confirmed it yet.
-- Your own dump of **Resistance: Fall of Man, US disc (BCUS98107), version 1.00**. This is the folder that contains `PS3_GAME`, the same kind of folder RPCS3 uses. Other regions and patched versions are not supported yet.
-- About 25 GB of free disk space: 16 GB for the game files and the rest for the build tools and the build.
-- An internet connection for the setup.
+- A CPU with AVX2 (Intel 4th generation or newer, or any AMD Ryzen).
+- A DirectX 12 GPU. It has been tested on AMD (RX 6700 XT) and NVIDIA (RTX 5070) cards. DLSS needs a GeForce RTX card; every other GPU uses FSR 3.1.
+- Your own dump of **Resistance: Fall of Man, US disc (BCUS98107), version 1.00**: the folder that contains `PS3_GAME`, the same kind of folder RPCS3 uses. Other regions and patched versions are not supported yet.
+- About 25 GB of free disk space: 16 GB for the game files, the rest for the build tools and the build.
+- An internet connection for setup.
 
 ## Install
 
-1. Download this repository: Click on Code at the top, then Download ZIP, then unzip it somewhere with no spaces in the path or folder name, for example `C:\Games\ResistancePort`.
-2. Double-click **`Setup.bat`**. It will:
-   - install the free build tools if they're missing (it needs Visual Studio 2022 Build Tools, LLVM, CMake, Ninja, and Python), using `winget`;
-   - ask you to pick your game folder, then copy it into the port folder (or move it, if it's on the same drive);
-   - decrypt the game's two program files, using the application keys from RPCS3's public source code;
-   - generate the game code from your copy and build the game.
+1. Download this repository (**Code → Download ZIP**) and unzip it to a path without spaces, for example `C:\Games\ResistancePort`.
+2. Double-click **`Setup.bat`**. It:
+   - installs the free build tools if they're missing (Visual Studio 2022 Build Tools, LLVM, CMake, Ninja, Python) using `winget`;
+   - asks for your game folder, then copies it into the port folder (or moves it, if it's on the same drive);
+   - decrypts the game's two program files using the application keys from RPCS3's public source code;
+   - downloads the DLSS SDK and FFmpeg;
+   - generates the game code from your copy and builds the game.
 
-   The first run takes a while: tool installs plus a 20–60 minute build.
-3. Play with **`Launcher.exe`**. It has the settings (display mode, resolution, frame rate, anti-aliasing, FOV, mouse sensitivity) and the key bindings.
+   The first run takes a while: installing the tools, plus a 20 to 60 minute build.
+3. Play with **`Launcher.exe`**. On the first start it detects your hardware and picks recommended settings; everything is adjustable there.
 
-You only need to run Setup again after downloading a newer version of the port, for example when I update it, other than that you can just use the launcher.
+Run Setup again only after downloading a newer version of the port.
 
-**First launch:** the game shows its own one-time "initial setup" screens. The first time you load into a level for example York, the world will render black for maybe 20 seconds or so while the graphics shaders are loading; after that first time, levels should load normally.
+**First launch:** the game shows its one-time "initial setup" screens. The first time you load a level, the world can stay black for about 20 seconds while shaders compile. After that, the shader cache is kept, including a backup that survives updates and reinstalls.
 
 ## Controls
 
@@ -75,37 +85,6 @@ More input options (launcher → Controls page, written to `settings.bat`; log l
 | **F12** or **PrtScn** | Screenshot: a PNG in the `screenshots` folder (`RFOM_YYYYMMDD_HHMMSS_mmm.png`); a "Screenshot saved" toast shows briefly. |
 | **F3** | Performance overlay (see *Performance overlay*). |
 | **Alt + F4** / the window's close button | Also quits cleanly (waits for a save in progress). |
-
-## Status
-
-This is a work in progress, tested on a single PC. The campaign has been played from the start through Grimsby; I haven't gone any further than Grimsby on this version so it's no man's land as I said:
-
-- It is mostly CPU bound, uses very little GPU. Even with how CPU bound it is, it likely won't skyrocket your usage the way that emulating would. Your temp may go up but still far less than emulating does and all while giving better performance.
-- Performance fixes have been applied as much as currently possible: the renderer was profiled and trimmed to about 5 µs of CPU per draw (York, ~2,600 draws per frame, locked 60 fps on a mid-range PC with DLSS 1080p → 4K), and low-end PCs benefit the most from the lower per-draw cost.
-- Performance is currently still limited by the game's SPU job system and varies by area; so having a decent CPU helps most.
-- There are occasional rare freezes and other bugs. The port watches for some freezes and may restart the game process automatically.
-
-If you hit a problem, let me know how to reproduce it and what it was, and if you can, send the `logs\run.log` from that session too (it's in the logs folder), that helps a ton, and I'll see if I can fix it.
-
-## How it works
-
-- `ps3recomp/` is a modified copy of [ps3recomp](https://github.com/sp00nznet/ps3recomp) by sp00nznet (MIT licence). It holds the runtime, the PS3 system libraries (graphics, audio, input, file system, SPU scheduling) and the lifters that translate PowerPC and SPU code into C/C++.
-- `project/` is the game-specific part of the port: its hooks, mouse look, the launcher and the debug tools.
-- `tools/rfom_regen.py` runs the lifters on your decrypted `EBOOT.elf` and `game.elf`, then re-applies this port's own edits to the generated code (`tools/hooks/`).
-
-## Known Bugs
-
-- General performance drops. That's mostly the game's SPU jobs (the stuff the PS3's SPUs used to handle), right now they kinda run one after another and the main thread just sits there waiting on them. It is basically the known limitation, I haven't found a way around that yet.
-- Sometimes you may randomly fall through the floor, it happened about 4 times across 3 days of testing so it's very rare and unknown what causes it yet, but a crutch has been added so that when it does happen it will hopefully put you back in place before you fall to your death, but I haven't been able to reproduce it to test the fix.
-- Shadows may flicker on and off at some times, but again it's rare and I am not sure what triggers it or how to reproduce it so I just have to play until it happens.
-- In intensive areas, sound may or may not become slightly staticky when FPS/performance drops (most noticeable right when coming out of the crater in York at the very beginning). Another SPU job issue, the sound mixing is one of those jobs so it gets bogged down right along with everything else.
-- FSR causing ghosting with some things like the sky at some rare moments.
-- One unknown, Rollers. On RPCS3, Rollers were the biggest problem, they would always crash your game when they come on screen unless you used OpenGL, Rollers would crash the game when on screen. This may be fixed or may not be, considering this uses DirectX 12 and not Vulkan. I have yet to get to where they spawn, I believe it is in Bracknell.
-- Out of bounds water like off the dock in Grimsby or under the bridge in Manchester has some triangles on it.
-
-## Some Plans
-
-- Revamping how the game runs in terms of windows, so that it doesn't open the CMD log window and doesn't reopen when loading into missions. The CMD is just for debugging and the reopen happens because on the PS3 disc the game is separated into two different programs, the main menu is one program and the level is another program, and on the PS3 when you load into a level from the main menu it opens that next program, the window is just the separate program. I plan on making them both load in one window and removing the CMD log.
 
 ## Launcher settings
 
@@ -238,6 +217,8 @@ Resistance: Fall of Man (2006) has no trophies: the game does not use the trophy
 
 ## Performance
 
+Measured in York (about 2,600 draws per frame), DLSS rendering at 1080p with 4K output, on an RTX 5070: **a locked 60 fps at about 5 µs of CPU per draw**. Performance fixes have been applied as far as realistically possible, all profile-driven. Low-end PCs benefit most, because the per-draw cost is CPU time.
+
 Performance fixes have been applied as much as possible, profile-driven, and carried over from the Resistance 2 port where they fit R1's own Direct3D 12 renderer:
 
 - **Renderer (per draw):** a redundant-state filter (draws that change nothing skip the state re-apply), fragment-constant patch memoisation, pipeline (PSO) reuse in the pre-pass, cached descriptors, a disk shader / pipeline cache with background compilation and a backup in `%LOCALAPPDATA%\ResistancePort\shadercache`.
@@ -286,8 +267,35 @@ Not included, and why: MSAA (the renderer's render targets are shared with PS3-f
 - **Upscaling** (with FSR or DLSS on): renders the 3D scene at 67 / 58 / 50 / 33 % and lets FSR / DLSS rebuild it at the render resolution. The DLSS preset (DLAA, Quality, Balanced, Performance, Ultra Performance) follows the chosen ratio. Menus and HUD stay at full resolution.
 - The shader cache is backed up to `%LOCALAPPDATA%\ResistancePort\shadercache` after each session and restored before launch, so reinstalling or updating doesn't bring back first-visit shader stutter.
 
+## Status
+
+- The campaign has been played up to Cheddar Gorge. Later levels haven't been tested yet, so problems are possible there.
+- Crashes and freezes are rare. Crash and hang reports are written automatically (see *Crash and hang reports*), and the port can restart the game process after a freeze.
+- The game is mostly CPU-bound and uses little GPU. CPU use and temperatures are far lower than when emulating the game.
+
+## Known issues
+
+- **Performance drops in heavy areas.** These come from the game's SPU jobs, which mostly run one after another while the main thread waits on them. A faster CPU helps most.
+- **Audio crackle when the frame rate drops** in intensive spots, for example coming out of the crater at the start of York. Audio mixing is one of the SPU jobs.
+- **Falling through the floor** has been seen a few times and hasn't been reproduced yet. A safeguard tries to put you back in place before the fall kills you.
+- **Shadows can flicker** occasionally.
+- **FSR can ghost** on some things, such as the sky, at rare moments. DLSS doesn't show this.
+- **Out-of-bounds water** (off the dock in Grimsby, under the bridge in Manchester) shows some stray triangles.
+- **Rollers:** on RPCS3 they crashed the game unless OpenGL was used. Their level hasn't been reached on this port yet.
+- **Ultrawide HUD:** the HUD is stretched with the view, not kept in a centred 16:9 area.
+- **Two program windows:** on the PS3 disc the main menu and the levels are separate programs, so the window reopens when you load into a level from the main menu. A minimised console window holds the log while the game runs.
+
+If you hit a problem, describe how to reproduce it and send `logs\run.log` from that session (plus `logs\crash\` if there was a crash).
+
+## How it works
+
+- `ps3recomp/` is a modified copy of [ps3recomp](https://github.com/sp00nznet/ps3recomp) by sp00nznet (MIT licence). It holds the runtime, the PS3 system libraries (graphics, audio, input, file system, SPU scheduling) and the lifters that translate PowerPC and SPU code into C/C++.
+- `project/` is the game-specific part of the port: its hooks, the D3D12 renderer integration, mouse look, the PC menu, the launcher and the debug tools.
+- `tools/rfom_regen.py` runs the lifters on your decrypted `EBOOT.elf` and `game.elf`, then re-applies this port's own edits to the generated code (`tools/hooks/`).
+
 ## Credits and licences
 
+- Original Resistance: Fall of Man recomp: [Psyykosis](https://github.com/Psyykosis/Resistance-Fall-of-Man-Recomp). This fork adds DLSS / FSR 3.1, the PC menu, ultrawide, the performance work and the other PC features above.
 - ps3recomp, by Ned Heller / sp00nznet: MIT.
 - AMD FidelityFX SDK (FSR 3.1), the DLLs in `tools/ffx_bin/`: MIT, © Advanced Micro Devices.
 - NVIDIA DLSS SDK v310.9.16, downloaded during setup into `tools/dlss/`: NVIDIA RTX SDK licence (`tools/dlss/LICENSE.txt`), not part of this repository.
